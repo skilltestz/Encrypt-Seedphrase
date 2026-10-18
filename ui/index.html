@@ -1,0 +1,832 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SeedVault & Bitcoin Signer — โปรแกรมเข้ารหัสเก็บ Seed 24 คำ & ลงนามธุรกรรม (Windows / macOS / Tails OS)</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Top Security Bar -->
+    <header class="top-bar">
+      <div class="brand">
+        <div class="shield-icon">🔐</div>
+        <div>
+          <h1>SeedVault <span class="badge-crypto">AES-256-GCM + scrypt + Shamir K-of-N</span></h1>
+          <p class="subtitle">Zero-Knowledge Seedphrase Vault & Bitcoin Transaction Signer • Windows / macOS / Tails OS</p>
+        </div>
+      </div>
+      <div class="status-pill-group">
+        <button type="button" id="openDirectHwModeTopBtn" class="btn btn-secondary btn-sm">
+          🔌 ใช้งานด้วย Trezor / Ledger ทันที (ไม่ต้องปลดล็อก Seed)
+        </button>
+        <span class="os-pill" id="osIndicator">Offline Loopback 100%</span>
+      </div>
+    </header>
+
+    <!-- Notification Banner -->
+    <div id="alertBanner" class="alert-banner hidden"></div>
+
+    <!-- =================================================================== -->
+    <!-- VIEW 1: FIRST-TIME SETUP MODE (การตั้งค่าครั้งแรก)                      -->
+    <!-- =================================================================== -->
+    <main id="setupView" class="view-container hidden">
+      <div class="card setup-card">
+        <div class="card-header">
+          <h2>🛡️ ตั้งค่าการเข้ารหัสเก็บ Seedphrase (ใช้งานครั้งแรก / สำหรับส่งต่อให้คนรุ่นหลัง)</h2>
+          <p>ข้อมูลของคุณจะถูกเข้ารหัสด้วย <strong>AES-256-GCM + PBKDF2-SHA512 + Memory-Hard scrypt</strong> และแบ่งกุญแจด้วยคณิตศาสตร์ <strong>Shamir's Secret Sharing</strong> โดยไม่เก็บรหัสผ่านหรือคำตอบจริงไว้ในโค้ดโปรแกรม ทำให้ไม่สามารถ Reverse Engineer หรือข้ามขั้นตอนการตรวจสอบความปลอดภัยได้</p>
+        </div>
+
+        <form id="setupForm" novalidate>
+          <!-- SECTION 1: Seedphrase Words (12, 15, 18, 20, 24) + 25th Passphrase -->
+          <section class="form-section">
+            <div class="section-title-row">
+              <h3>1. กรอก Seedphrase ที่ต้องการเข้ารหัส</h3>
+              <div class="word-count-selector" role="group" aria-label="Word Count Selector">
+                <span>จำนวนคำ:</span>
+                <button type="button" class="wc-btn" data-count="12">12 คำ</button>
+                <button type="button" class="wc-btn" data-count="15">15 คำ</button>
+                <button type="button" class="wc-btn" data-count="18">18 คำ</button>
+                <button type="button" class="wc-btn" data-count="20">20 คำ</button>
+                <button type="button" class="wc-btn active" data-count="24">24 คำ (มาตรฐานสูงสุด)</button>
+              </div>
+            </div>
+            <p class="section-hint">สามารถวางข้อความทั้งชุดลงในช่องที่ 1 เพื่อกระจายคำอัตโนมัติ หรือพิมพ์ทีละช่อง (รับเฉพาะ 12, 15, 18, 20, 24 คำเท่านั้น)</p>
+
+            <div id="seedWordsGrid" class="seed-grid"></div>
+
+            <!-- 25th Word (Passphrase) -->
+            <div class="passphrase-25-box">
+              <div class="passphrase-toggle-row">
+                <label class="checkbox-label">
+                  <input type="checkbox" id="enablePassphrase25" />
+                  <span><strong>ฝากคำว่า Passphrase (คำที่ 25) ไว้ด้วย</strong> — หรือจะเว้นว่างไว้เพื่อไปกรอกคำที่ 25 เองตอนทำรายการโอนเหรียญในภายหลังก็ได้</span>
+                </label>
+              </div>
+              <div id="passphrase25Container" class="hidden mt-12">
+                <label for="passphrase25Input" class="input-label">คำที่ 25 (BIP39 Passphrase พิเศษ):</label>
+                <input
+                  type="text"
+                  id="passphrase25Input"
+                  class="text-input"
+                  placeholder="กรอก Passphrase (คำที่ 25) ของคุณ..."
+                  autocomplete="off"
+                />
+              </div>
+            </div>
+          </section>
+
+          <!-- SECTION 2: Questions 1-5 & Threshold K of N -->
+          <section class="form-section">
+            <div class="section-title-row">
+              <h3>2. ตั้งคำถาม – คำตอบสำหรับลูกหลาน/ผู้รับมรดก (ตั้งได้ 1 ถึง 5 ข้อ)</h3>
+              <button type="button" id="addQuestionBtn" class="btn btn-secondary btn-sm">+ เพิ่มคำถาม (สูงสุด 5 ข้อ)</button>
+            </div>
+            <p class="section-hint">คุณสามารถกำหนดได้ว่าตอนปลดล็อกต้องตอบถูกกี่ข้อ (เช่น ตั้งไว้ 5 ข้อ แต่กำหนดให้ตอบถูกเพียง 3 ข้อก็ปลดล็อกผ่านได้)</p>
+
+            <div id="questionsContainer" class="questions-list"></div>
+
+            <div id="questionThresholdBox" class="threshold-box">
+              <label for="requiredQuestionCount">จำนวนข้อที่ต้องตอบถูกขั้นต่ำ (K จาก N ข้อ):</label>
+              <select id="requiredQuestionCount" class="select-input"></select>
+            </div>
+          </section>
+
+          <!-- SECTION 3: Phone Last 4 Digits & Special Code -->
+          <section class="form-section">
+            <h3>3. วิธีการยืนยันเพิ่มเติม (เบอร์โทรศัพท์ 4 ตัวท้าย / รหัสพิเศษ)</h3>
+            <p class="section-hint">สามารถเลือกตั้งค่าอย่างใดอย่างหนึ่ง หรือทั้งสองอย่าง เพื่อใช้ร่วมกับคำถาม หรือใช้เป็นรหัสเปิดเข้าถึงได้ทันที</p>
+
+            <div class="two-col-grid">
+              <div class="factor-box">
+                <label class="checkbox-label">
+                  <input type="checkbox" id="enablePhoneFactor" checked />
+                  <span><strong>ใช้เบอร์โทรศัพท์ 4 ตัวท้าย</strong></span>
+                </label>
+                <div id="phoneFactorInputWrap" class="mt-10">
+                  <input
+                    type="text"
+                    id="setupPhoneLast4"
+                    class="text-input pin-input"
+                    maxlength="4"
+                    pattern="\d{4}"
+                    placeholder="ตัวเลข 4 หลัก เช่น 8899"
+                    autocomplete="off"
+                  />
+                </div>
+              </div>
+
+              <div class="factor-box">
+                <label class="checkbox-label">
+                  <input type="checkbox" id="enableSpecialFactor" checked />
+                  <span><strong>ใช้รหัสพิเศษ (Special Code)</strong></span>
+                </label>
+                <div id="specialFactorInputWrap" class="mt-10">
+                  <input
+                    type="password"
+                    id="setupSpecialCode"
+                    class="text-input"
+                    placeholder="กำหนดรหัสลับพิเศษของคุณ..."
+                    autocomplete="off"
+                  />
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- SECTION 4: Flexible Unlock Condition Policy & Attempt Limit -->
+          <section class="form-section">
+            <h3>4. เงื่อนไขการปลดล็อก & จำนวนการกรอกผิดสูงสุด</h3>
+            <div class="two-col-grid">
+              <div>
+                <label for="policyModeSelect" class="input-label">รูปแบบเงื่อนไขการเปิดเข้าถึงรหัส (Unlock Policy):</label>
+                <select id="policyModeSelect" class="select-input full-width">
+                  <option value="OR_ANY">
+                    โหมดยืดหยุ่น (OR): ตอบคำถามให้ครบตามเกณฑ์ หรือ กรอกเบอร์โทร 4 ตัวท้าย หรือ กรอกรหัสพิเศษ เพื่อเปิดได้ทันที
+                  </option>
+                  <option value="QUESTIONS_AND_PIN_OR_CODE">
+                    โหมดผสม (AND/OR): ต้องตอบคำถามให้ครบตามเกณฑ์ และ กรอก (เบอร์โทร 4 ตัวท้าย หรือ รหัสพิเศษ)
+                  </option>
+                  <option value="ALL_CONFIGURED">
+                    โหมดเข้มงวดสูงสุด (ALL): ต้องกรอกทุกอย่างที่ตั้งค่าไว้ให้ถูกต้องทั้งหมดพร้อมกัน
+                  </option>
+                </select>
+
+                <div id="fastTrackOptions" class="fast-track-box hidden mt-12">
+                  <p class="small-note">ตัวเลือกทางด่วนพิเศษ (อนุญาตให้เปิดทันทีโดยไม่ต้องตอบคำถาม):</p>
+                  <label class="checkbox-label mt-6">
+                    <input type="checkbox" id="allowPhoneInstantUnlock" />
+                    <span>อนุญาตให้กรอกแค่ <strong>เบอร์โทร 4 ตัวท้าย</strong> ก็เปิดใช้งานได้ทันที</span>
+                  </label>
+                  <label class="checkbox-label mt-6">
+                    <input type="checkbox" id="allowSpecialInstantUnlock" />
+                    <span>อนุญาตให้กรอกแค่ <strong>รหัสพิเศษ</strong> ก็เปิดใช้งานได้ทันที</span>
+                  </label>
+                </div>
+              </div>
+
+              <div>
+                <label for="maxAttemptsInput" class="input-label">
+                  จำนวนครั้งที่อนุญาตให้กรอกผิดสูงสุด (ก่อนลบข้อมูลอัตโนมัติ):
+                </label>
+                <div class="attempt-config-row">
+                  <input
+                    type="number"
+                    id="maxAttemptsInput"
+                    class="text-input attempt-number-input"
+                    min="1"
+                    max="100"
+                    value="5"
+                  />
+                  <span class="attempt-unit">ครั้ง</span>
+                </div>
+                <p class="warning-text mt-8">
+                  ⚠️ หากกรอกผิดเกินจำนวนที่กำหนด ข้อความที่เก็บไว้จะถูกลบหายไปทันที (3-Pass Zero-Wipe) และรีเซ็ตโปรแกรม แม้เปลี่ยนเครื่องคอมพิวเตอร์ก็ไม่สามารถนับจำนวนครั้งใหม่ได้
+                </p>
+              </div>
+            </div>
+          </section>
+
+          <!-- SECTION 5: Multi-Game Anti-Bot Pipeline Option -->
+          <section class="form-section game-config-section">
+            <div class="section-title-row">
+              <h3>5. โมดูลเกมส์ป้องกัน Bot ก่อนเข้าหน้ากรอกรหัสผ่าน (Multi-Game Shield Pipeline)</h3>
+              <span class="tag-future">รองรับการเล่นมากกว่า 1 เกมส์ต่อเนื่อง</span>
+            </div>
+            <label class="checkbox-label">
+              <input type="checkbox" id="enableGameModule" />
+              <span><strong>เปิดใช้งานด่านเกมส์ป้องกัน Bot ก่อนเข้าถึงหน้ากรอกรหัสผ่าน</strong> (บังคับตรวจ Token ฝั่ง Server ห้ามข้ามด่าน)</span>
+            </label>
+            <div id="gameModuleSettings" class="three-col-grid mt-12 hidden">
+              <div>
+                <label for="requiredGamesCountSelect" class="input-label">จำนวนด่านเกมส์ที่ต้องเล่นให้ผ่านต่อเนื่อง:</label>
+                <select id="requiredGamesCountSelect" class="select-input full-width">
+                  <option value="1">1 ด่านเกมส์ก่อนกรอกรหัส</option>
+                  <option value="2">2 ด่านเกมส์ต่อเนื่อง (Multi-Stage)</option>
+                  <option value="3">3 ด่านเกมส์ต่อเนื่อง (ป้องกันสูงสุด)</option>
+                </select>
+              </div>
+              <div>
+                <label for="gameTypeSelect" class="input-label">รูปแบบมินิเกมส์เริ่มต้น:</label>
+                <select id="gameTypeSelect" class="select-input full-width">
+                  <option value="pattern_shield">Cyber Matrix Pattern Shield (จำลำดับโหนด 4x4)</option>
+                  <option value="orbital_lock">Orbital Timing Lock (หมุนวงแหวนควอนตัม 3 ชั้น)</option>
+                  <option value="chroma_slider">Chroma Spectrum Match (เลื่อนแถบสีให้ตรงกับตัวอย่าง)</option>
+                  <option value="glyph_outlier">Spot the Outlier (แตะเลือกสัญลักษณ์ที่ไม่เข้าพวก)</option>
+                  <option value="bubble_sequence">Ascending Number Tap (แตะฟองตัวเลขเรียงจากน้อยไปมาก)</option>
+                  <option value="puzzle_slider">Slide to Snap (เลื่อนกุญแจเข้าช่องเป้าหมาย)</option>
+                </select>
+              </div>
+              <div>
+                <label for="gameDifficultySelect" class="input-label">ระดับความยากของด่านเกมส์:</label>
+                <select id="gameDifficultySelect" class="select-input full-width">
+                  <option value="1">ระดับ 1 - มาตรฐาน (ง่ายสำหรับผู้รับมรดก)</option>
+                  <option value="2">ระดับ 2 - ปานกลาง</option>
+                  <option value="3">ระดับ 3 - เข้มงวด</option>
+                </select>
+              </div>
+            </div>
+          </section>
+
+          <div class="form-actions">
+            <button type="submit" id="saveVaultBtn" class="btn btn-primary btn-lg">
+              🔒 เข้ารหัสและบันทึก Seedphrase ลงระบบ
+            </button>
+          </div>
+        </form>
+      </div>
+    </main>
+
+    <!-- =================================================================== -->
+    <!-- VIEW 2: UNLOCK VIEW (หน้าจอเข้าใช้งานทุกครั้ง)                          -->
+    <!-- =================================================================== -->
+    <main id="unlockView" class="view-container hidden">
+      <!-- Top Status Bar required on every launch: Remaining Attempts & Reset Button -->
+      <div class="unlock-top-bar">
+        <div class="counter-card">
+          <div class="counter-label">จำนวนครั้งที่กรอกได้ คงเหลือ:</div>
+          <div class="counter-value">
+            <span id="remainingAttemptsDisplay">5</span>
+            <span class="counter-max">/ <span id="maxAttemptsDisplay">5</span> ครั้ง</span>
+          </div>
+          <div class="counter-sub">ซิงค์ผูกกับไฟล์เข้ารหัส (เปลี่ยนเครื่องไม่สามารถรีเซ็ตจำนวนครั้งได้)</div>
+        </div>
+
+        <div class="reset-action-card">
+          <button type="button" id="openDirectHwFromUnlockBtn" class="btn btn-primary full-width">
+            🔌 เชื่อมต่อ Trezor / Ledger โอนเหรียญทันที (ไม่ต้องปลดล็อก Seed)
+          </button>
+          <button type="button" id="openResetModalBtn" class="btn btn-danger full-width mt-6">
+            🔄 เริ่มต้นตั้งค่าใหม่ (Reset Program)
+          </button>
+        </div>
+      </div>
+
+      <!-- Optional Pre-Unlock Multi-Stage Game Module Shield -->
+      <div id="gameShieldCard" class="card game-card hidden">
+        <div class="card-header">
+          <div class="section-title-row">
+            <h2>🎮 ด่านเกมส์ป้องกัน Bot (<span id="gameTitleDisplay">Pattern Shield</span>)</h2>
+            <span id="gameStageProgressBadge" class="badge-crypto">ด่านที่ 1 / 1</span>
+          </div>
+          <p>กรุณาเล่นมินิเกมส์ให้ผ่านครบทุกด่านเพื่อรับสิทธิ์เปิดแผงกรอกรหัสผ่าน</p>
+        </div>
+        <div id="gameStageContainer" class="game-stage"></div>
+      </div>
+
+      <!-- Main Password / Verification Input Card -->
+      <div id="unlockCredentialsCard" class="card unlock-card">
+        <div class="card-header">
+          <h2>🔑 กรอกรหัสผ่านหรือตอบคำถามเพื่อปลดล็อก Seed 24 คำที่บันทึกไว้</h2>
+          <p id="unlockPolicyDescription" class="subtitle"></p>
+        </div>
+
+        <!-- Available Unlock Method Badges -->
+        <div id="availableMethodsBar" class="methods-bar"></div>
+
+        <form id="unlockForm" novalidate>
+          <!-- Questions Block -->
+          <div id="unlockQuestionsBlock" class="unlock-block hidden">
+            <div class="block-header">
+              <h3>📝 คำถามความปลอดภัย (<span id="unlockQuestionRuleText"></span>)</h3>
+            </div>
+            <div id="unlockQuestionsList" class="questions-list"></div>
+          </div>
+
+          <!-- Phone Last 4 Digits & Special Code Block -->
+          <div class="two-col-grid mt-16">
+            <div id="unlockPhoneBlock" class="unlock-block hidden">
+              <label for="unlockPhoneInput" class="input-label">📱 เบอร์โทรศัพท์ 4 ตัวท้าย:</label>
+              <input
+                type="password"
+                id="unlockPhoneInput"
+                class="text-input pin-input"
+                maxlength="4"
+                inputmode="numeric"
+                placeholder="••••"
+                autocomplete="off"
+              />
+            </div>
+
+            <div id="unlockSpecialBlock" class="unlock-block hidden">
+              <label for="unlockSpecialInput" class="input-label">⚡ รหัสพิเศษ (Special Code):</label>
+              <input
+                type="password"
+                id="unlockSpecialInput"
+                class="text-input"
+                placeholder="กรอกรหัสพิเศษ..."
+                autocomplete="off"
+              />
+            </div>
+          </div>
+
+          <div class="form-actions mt-20">
+            <button type="submit" id="unlockSubmitBtn" class="btn btn-primary btn-lg">
+              🔓 ยืนยันรหัสผ่านและปลดล็อก Seedphrase
+            </button>
+          </div>
+        </form>
+      </div>
+    </main>
+
+    <!-- =================================================================== -->
+    <!-- VIEW 3: DECRYPTED VAULT & BITCOIN TRANSACTION STUDIO                -->
+    <!-- =================================================================== -->
+    <main id="decryptedView" class="view-container hidden">
+      <!-- Card 3A: Decrypted Seedphrase Display (Hidden if entered via Direct Hardware Wallet Mode without unlocking) -->
+      <div id="unlockedSeedDisplayCard" class="card decrypted-card">
+        <div class="card-header decrypted-header">
+          <div>
+            <span class="badge-unlocked">✓ ถอดรหัสสำเร็จ (AES-256-GCM Verified)</span>
+            <h2>🔓 ข้อมูล Seedphrase ที่ปลดล็อกจากระบบ (<span id="decryptedWordCount">24</span> คำ)</h2>
+            <p id="unlockedBySlotText" class="subtitle"></p>
+          </div>
+          <div class="decrypted-actions">
+            <button type="button" id="toggleMaskWordsBtn" class="btn btn-secondary">👁️ ซ่อน/แสดงคำศัพท์</button>
+            <button type="button" id="copyAllWordsBtn" class="btn btn-secondary">📋 คัดลอก Seedphrase</button>
+            <button type="button" id="lockVaultNowBtn" class="btn btn-primary">🔒 ล็อกตู้นิรภัยทันที</button>
+          </div>
+        </div>
+
+        <div id="decryptedWordsGrid" class="seed-grid decrypted-grid"></div>
+
+        <div id="decryptedPassphraseBox" class="passphrase-25-display hidden">
+          <div class="passphrase-label">คำที่ 25 ที่บันทึกไว้ (Saved Passphrase):</div>
+          <div id="decryptedPassphraseValue" class="passphrase-value"></div>
+        </div>
+      </div>
+
+      <!-- Banner shown when in Direct Hardware Wallet Mode (Seed Vault Still Locked & Safe) -->
+      <div id="directHwModeBanner" class="card direct-hw-banner hidden">
+        <div class="decrypted-header">
+          <div>
+            <span class="badge-crypto">🛡️ โหมด Hardware Wallet โดยตรง (Direct Trezor / Ledger Mode)</span>
+            <h2>🔌 ใช้งานกระเป๋า Bitcoin ด้วย Key จาก Trezor / Ledger โดยไม่ต้องปลดล็อก Seed 24 คำ</h2>
+            <p class="subtitle">ตู้นิรภัย Seed 24 คำในระบบยังคงล็อกและเข้ารหัสอยู่ 100% เพื่อความปลอดภัยสูงสุด</p>
+          </div>
+          <button type="button" id="backToUnlockScreenBtn" class="btn btn-secondary">
+            ← กลับไปหน้าปลดล็อก Seed 24 คำ
+          </button>
+        </div>
+      </div>
+
+      <!-- Card 3B: Bitcoin Multi-Script Wallet, UTXO Coin Selector & Transaction Signer -->
+      <div class="card btc-signer-card">
+        <div class="card-header">
+          <div class="section-title-row">
+            <h2>₿ ระบบกระเป๋า Bitcoin, เลือก UTXO & ลงนามธุรกรรม (Taproot / Native SegWit / SegWit / Legacy)</h2>
+            <span class="badge-crypto">BIP86 Taproot • BIP84 SegWit • BIP49 • BIP44 • PSBT</span>
+          </div>
+          <p>เลือกแหล่งที่มาของ Key, เลือกประเภท Address (Taproot / Native SegWit / SegWit / Legacy), และติ๊กเลือกก้อน <strong>UTXO</strong> เพื่อสร้างและลงนามธุรกรรมโอนเหรียญ</p>
+        </div>
+
+        <!-- 1. Key Source Mode Selector (3 Modes) -->
+        <div class="form-section">
+          <div id="keySourceTabsWrapper">
+            <label class="input-label">1. เลือกแหล่งที่มาของกุญแจสำหรับทำรายการ (Key Source):</label>
+            <div class="signer-mode-tabs mt-6">
+              <button type="button" id="modeVaultSeedBtn" class="tab-btn active">
+                🗝️ ใช้ Seed จากการปลดล็อก (Default)
+              </button>
+              <button type="button" id="modeManualSeedBtn" class="tab-btn">
+                ✍️ Import / กรอก Seed เองหลังปลดล็อก (Manual Seed)
+              </button>
+              <button type="button" id="modeHardwareUsbBtn" class="tab-btn">
+                🔌 ใช้ Key จาก Trezor / Ledger (USB Hardware Wallet)
+              </button>
+            </div>
+          </div>
+
+          <!-- Manual Seed Import Box (Shown only when Manual Seed mode is active) -->
+          <div id="manualSeedImportPanel" class="mt-12 hidden">
+            <label for="manualSeedTextarea" class="input-label">
+              กรอก Seedphrase ที่ต้องการ Import ชั่วคราว (12, 15, 18, 20 หรือ 24 คำ คั่นด้วยเว้นวรรค — ข้อมูลจะอยู่ใน RAM เท่านั้น ไม่ทับไฟล์เดิม):
+            </label>
+            <textarea
+              id="manualSeedTextarea"
+              class="text-input mono-input"
+              rows="2"
+              placeholder="พิมพ์หรือวาง Seedphrase 12 - 24 คำที่นี่..."
+            ></textarea>
+          </div>
+
+          <!-- Hardware Wallet USB Panel (Shown when Hardware Wallet mode is active) -->
+          <div id="hardwareUsbPanel" class="mt-12 hidden">
+            <div class="section-title-row">
+              <div>
+                <strong>🔌 เชื่อมต่อและสแกน Address + UTXO จาก Trezor / Ledger อัตโนมัติ</strong>
+                <p id="hardwareUsbStatusText" class="subtitle">
+                  • <strong>Ledger:</strong> กรุณาปลดล็อกเครื่องและกดเข้าแอป <strong>"Bitcoin"</strong> บนหน้าจอ Ledger ก่อนกดปุ่มเชื่อมต่อ<br/>
+                  • <strong>Trezor:</strong> สามารถกรอก <strong>Passphrase (คำที่ 25)</strong> ด้านล่างก่อนกดเชื่อมต่อ เพื่อสแกนกระเป๋า Hidden Wallet ได้ทันที
+                </p>
+              </div>
+              <div class="decrypted-actions">
+                <button type="button" id="connectLedgerUsbBtn" class="btn btn-primary btn-sm">
+                  🛡️ Connect Ledger & สแกนอัตโนมัติ
+                </button>
+                <button type="button" id="connectTrezorUsbBtn" class="btn btn-primary btn-sm">
+                  ⚡ Connect Trezor & สแกนอัตโนมัติ
+                </button>
+              </div>
+            </div>
+
+            <!-- Trezor Passphrase (25th Word) & Path Controls for Hardware Wallet -->
+            <div class="two-col-grid mt-12" style="background: rgba(15, 23, 42, 0.55); padding: 12px; border-radius: 10px; border: 1px solid rgba(56, 189, 248, 0.25);">
+              <div>
+                <label for="trezorPassphraseInput" class="input-label">
+                  🔑 Passphrase สำหรับ Trezor (คำที่ 25 / Hidden Wallet):
+                </label>
+                <div class="attempt-config-row">
+                  <input
+                    type="password"
+                    id="trezorPassphraseInput"
+                    class="text-input"
+                    placeholder="เว้นว่างหากใช้ Standard Wallet หรือพิมพ์ Passphrase ของ Trezor..."
+                    autocomplete="off"
+                  />
+                  <button type="button" id="toggleTrezorPassBtn" class="btn btn-secondary btn-sm" title="แสดง/ซ่อน Passphrase">
+                    👁️
+                  </button>
+                </div>
+                <label class="checkbox-label mt-6" style="font-size: 0.84rem; display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                  <input type="checkbox" id="trezorPassOnDeviceCheckbox" />
+                  <span>ต้องการพิมพ์ Passphrase บนหน้าจอตัวเครื่อง Trezor โดยตรง</span>
+                </label>
+              </div>
+
+              <div>
+                <label class="input-label">
+                  🔄 คำสั่งควบคุมเครื่อง Trezor / Ledger (Verify & Rescan):
+                </label>
+                <div class="attempt-config-row" style="gap: 8px; flex-wrap: wrap;">
+                  <button type="button" id="rescanHardwareAddressBtn" class="btn btn-secondary btn-sm" style="flex: 1;">
+                    🔄 อัปเดต Passphrase / สแกนใหม่
+                  </button>
+                  <button type="button" id="verifyAddressOnTrezorBtn" class="btn btn-secondary btn-sm" style="flex: 1;">
+                    👁️ Verify Address บนจอ Trezor / Ledger
+                  </button>
+                </div>
+                <p class="subtitle" style="font-size: 0.8rem; margin-top: 6px;">
+                  รองรับโปรโตคอล <code>trezor-firmware</code> (<code>GetPublicKey</code>, <code>GetAddress</code>, <code>SignTx/TxAck</code>) และ Ledger APDU (<code>0xE0/0xE1</code>) แบบ Offline
+                </p>
+              </div>
+            </div>
+
+            <details class="mt-10" style="font-size: 0.88rem; color: var(--text-muted);">
+              <summary style="cursor: pointer; user-select: none;">
+                ▸ กรณีไม่ได้เสียบสาย USB หรือต้องการระบุ Address / Xpub เอง (Watch-Only / Air-Gapped)
+              </summary>
+              <div class="mt-10">
+                <label for="hwWalletAddressInput" class="input-label">
+                  Bitcoin Address ที่สแกนได้จากอุปกรณ์ (หรือระบุเองกรณี Offline):
+                </label>
+                <input
+                  type="text"
+                  id="hwWalletAddressInput"
+                  class="text-input mono-input"
+                  placeholder="ระบบจะดึงให้อัตโนมัติเมื่อกด Connect Ledger / Trezor หรือวาง bc1p... / bc1q... ที่นี่"
+                  autocomplete="off"
+                />
+              </div>
+            </details>
+          </div>
+        </div>
+
+        <!-- 2. Script Type Selector (Taproot / Native SegWit / Nested SegWit / Legacy) & 25th Passphrase -->
+        <div class="form-section">
+          <div class="section-title-row">
+            <label class="input-label">2. เลือกประเภทบัญชี (Script Type & Derivation Path):</label>
+            <div class="script-type-pills" role="group">
+              <button type="button" class="script-pill" data-script="TAPROOT" data-path="m/86'/0'/0'/0/0">
+                ⚡ Taproot (bc1p...)
+              </button>
+              <button type="button" class="script-pill active" data-script="NATIVE_SEGWIT" data-path="m/84'/0'/0'/0/0">
+                🛡️ Native SegWit (bc1q...)
+              </button>
+              <button type="button" class="script-pill" data-script="NESTED_SEGWIT" data-path="m/49'/0'/0'/0/0">
+                🔄 SegWit (3...)
+              </button>
+              <button type="button" class="script-pill" data-script="LEGACY" data-path="m/44'/0'/0'/0/0">
+                🏛️ Legacy (1...)
+              </button>
+            </div>
+          </div>
+
+          <div id="seedDerivationControls" class="two-col-grid mt-12">
+            <div>
+              <label for="signingPassphrase25Input" class="input-label">
+                Passphrase คำที่ 25 (เพิ่มหรือเปลี่ยนเองได้ตลอดเวลา):
+              </label>
+              <input
+                type="text"
+                id="signingPassphrase25Input"
+                class="text-input"
+                placeholder="เว้นว่างหากไม่มีคำที่ 25 หรือพิมพ์ Passphrase เพิ่มเติม..."
+                autocomplete="off"
+              />
+            </div>
+            <div>
+              <label for="btcDerivationPathInput" class="input-label">
+                BIP32 Derivation Path:
+              </label>
+              <div class="attempt-config-row">
+                <input
+                  type="text"
+                  id="btcDerivationPathInput"
+                  class="text-input mono-input"
+                  value="m/84'/0'/0'/0/0"
+                />
+                <button type="button" id="deriveWalletBtn" class="btn btn-secondary">
+                  🔄 คำนวณ Address
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Derived Wallet Address Summary -->
+          <div id="derivedWalletInfoBox" class="wallet-info-box mt-12">
+            <div class="wallet-info-row">
+              <span class="wallet-lbl">Address ปัจจุบันที่เลือกใช้ (<span id="activeScriptNameLabel">Native SegWit</span>):</span>
+              <code id="btcActiveAddressDisplay" class="wallet-code highlight-addr">-</code>
+            </div>
+            <div class="wallet-info-row">
+              <span class="wallet-lbl">Taproot (bc1p) / Native SegWit (bc1q):</span>
+              <code id="btcTaprootSegwitDisplay" class="wallet-code">-</code>
+            </div>
+            <div class="wallet-info-row">
+              <span class="wallet-lbl">SegWit (3...) / Legacy (1...) / Fingerprint:</span>
+              <code id="btcLegacyFingerprintDisplay" class="wallet-code">-</code>
+            </div>
+          </div>
+        </div>
+
+        <!-- 3. Interactive UTXO Selector Table (Coin Control) -->
+        <div class="form-section">
+          <div class="section-title-row">
+            <div>
+              <h3>3. เลือกรายการก้อนเหรียญ UTXO ที่ต้องการใช้โอน (Coin Selection)</h3>
+              <p class="section-hint" style="margin-bottom:0;">
+                คลิกติ๊กเลือกก้อน UTXO ที่ต้องการใช้จ่าย (สามารถกดดึงข้อมูล UTXO อัตโนมัติ, บันทึก/โหลดไฟล์ UTXO สำหรับเครื่อง Offline, หรือกรอกเองได้)
+              </p>
+            </div>
+            <div class="decrypted-actions" style="flex-wrap: wrap;">
+              <button type="button" id="scanBlockchainUtxoBtn" class="btn btn-primary btn-sm">
+                🔍 ดึง UTXO อัตโนมัติ
+              </button>
+              <button type="button" id="exportOfflineUtxoBtn" class="btn btn-secondary btn-sm" title="บันทึกข้อมูล UTXO ลง Flash Drive เพื่อนำไปเซ็นบนเครื่อง Offline">
+                💾 บันทึก UTXO (Offline)
+              </button>
+              <button type="button" id="importOfflineUtxoBtn" class="btn btn-secondary btn-sm" title="โหลดไฟล์ UTXO บนเครื่องที่ไม่ได้ต่อเน็ต">
+                📂 โหลด UTXO (Offline)
+              </button>
+              <input type="file" id="importOfflineUtxoFileInput" accept=".json" class="hidden" />
+              <button type="button" id="addCustomUtxoRowBtn" class="btn btn-secondary btn-sm">
+                + เพิ่มรายการ UTXO
+              </button>
+            </div>
+          </div>
+
+          <!-- UTXO Table -->
+          <div class="utxo-table-wrap mt-12">
+            <table class="utxo-table">
+              <thead>
+                <tr>
+                  <th style="width: 48px;">เลือก</th>
+                  <th>Transaction ID (TXID 64 ตัวอักษร)</th>
+                  <th style="width: 90px;">vout</th>
+                  <th style="width: 170px;">จำนวน (Satoshis)</th>
+                  <th style="width: 60px;">ลบ</th>
+                </tr>
+              </thead>
+              <tbody id="utxoTableBody"></tbody>
+            </table>
+          </div>
+
+          <div class="utxo-summary-bar mt-10">
+            <span>จำนวน UTXO ที่เลือก: <strong id="selectedUtxoCountText">1</strong> รายการ</span>
+            <span>ยอดรวมเหรียญที่เลือกใช้ได้: <strong id="selectedUtxoTotalSatsText">0</strong> Satoshis</span>
+          </div>
+        </div>
+
+        <!-- 4. Recipients & Transaction Sign / PSBT Action -->
+        <form id="btcSignForm" class="form-section" novalidate>
+          <h3>4. ระบุปลายทางผู้รับเหรียญ & ลงนามธุรกรรม (Send & Sign Transaction)</h3>
+
+          <div class="two-col-grid mt-12">
+            <div>
+              <label for="destAddressInput" class="input-label">Address ปลายทางผู้รับ (รองรับ bc1p... / bc1q... / 3... / 1...):</label>
+              <input
+                type="text"
+                id="destAddressInput"
+                class="text-input mono-input"
+                placeholder="กรอก Bitcoin Address ปลายทาง..."
+                autocomplete="off"
+              />
+            </div>
+            <div class="two-col-grid">
+              <div>
+                <div class="section-title-row" style="margin-bottom: 4px;">
+                  <label for="sendAmountSatsInput" class="input-label" style="margin-bottom: 0;">จำนวนที่โอน:</label>
+                  <select id="sendAmountUnitSelect" class="text-input" style="width: auto; padding: 2px 8px; font-size: 0.82rem; height: 28px;">
+                    <option value="SATS" selected>หน่วย: Satoshis (Sats)</option>
+                    <option value="BTC">หน่วย: BTC (ทศนิยม เช่น 0.0035)</option>
+                  </select>
+                </div>
+                <input
+                  type="number"
+                  id="sendAmountSatsInput"
+                  class="text-input"
+                  min="0"
+                  step="any"
+                  placeholder="เช่น 95000 Sats หรือเลือกหน่วย BTC"
+                />
+                <div id="sendAmountConversionHint" class="subtitle" style="font-size: 0.78rem; margin-top: 4px;">
+                  = 0 Satoshis (0.00000000 BTC)
+                </div>
+              </div>
+              <div>
+                <label for="feeSatsInput" class="input-label">ค่าธรรมเนียมเครือข่าย (Fee Sats):</label>
+                <input
+                  type="number"
+                  id="feeSatsInput"
+                  class="text-input"
+                  min="150"
+                  step="1"
+                  value="1000"
+                />
+              </div>
+            </div>
+          </div>
+
+          <div class="two-col-grid mt-12">
+            <div>
+              <label for="changeAddressInput" class="input-label">
+                Address รับเงินทอนใหม่ (Fresh Change Address — Path เงินทอนแยกจาก Address รับเงิน):
+              </label>
+              <input
+                type="text"
+                id="changeAddressInput"
+                class="text-input mono-input"
+                placeholder="ระบบสร้าง Address รับเงินทอนใหม่ (m/.../1/0) ให้อัตโนมัติ ไม่ซ้ำกับ Address รับเงิน"
+                autocomplete="off"
+              />
+              <div id="changePathHintText" class="subtitle" style="font-size: 0.78rem; margin-top: 4px;">
+                🔒 ใช้ Internal Change Path (<code>m/.../1/0</code>) เพื่อความเป็นส่วนตัวและให้ Trezor ยืนยันว่าเงินทอนกลับเข้ากระเป๋าคุณเอง
+              </div>
+            </div>
+            <div>
+              <label for="changeAmountSatsInput" class="input-label">
+                เงินทอนคำนวณอัตโนมัติ (Change Satoshis = ยอดรวม UTXO - ยอดโอน - ค่าธรรมเนียม):
+              </label>
+              <input
+                type="number"
+                id="changeAmountSatsInput"
+                class="text-input"
+                min="0"
+                value="0"
+                readonly
+              />
+            </div>
+          </div>
+
+          <div class="form-actions mt-16">
+            <button type="submit" id="signTxSubmitBtn" class="btn btn-primary btn-lg">
+              ✍️ ลงนามธุรกรรม (Sign Transaction) / สร้าง PSBT สำหรับ Trezor & Ledger
+            </button>
+          </div>
+        </form>
+
+        <!-- Signed Transaction Output & Broadcast Panel -->
+        <div id="signedTxOutputPanel" class="form-section hidden">
+          <div class="section-title-row">
+            <h3>✅ ผลลัพธ์ธุรกรรม (Signed Raw TX & Hardware Wallet PSBT)</h3>
+            <span id="signedTxFeeBadge" class="badge-crypto">Fee: 0 sats</span>
+          </div>
+
+          <div class="mt-10">
+            <label class="input-label">Transaction ID (TXID):</label>
+            <code id="signedTxidDisplay" class="wallet-code full-width">-</code>
+          </div>
+
+          <div id="signedHexBlock" class="mt-10">
+            <label class="input-label">Signed Raw Transaction Hex (พร้อมกด Broadcast โอนเงิน หรือบันทึกไฟล์ไป Broadcast เอง):</label>
+            <textarea id="signedRawTxHexArea" class="text-input mono-input" rows="3" readonly></textarea>
+          </div>
+
+          <div class="mt-10">
+            <label class="input-label">Hardware Wallet PSBT (Base64 สำหรับ Trezor / Ledger / Sparrow / Electrum):</label>
+            <textarea id="unsignedPsbtArea" class="text-input mono-input" rows="2" readonly></textarea>
+          </div>
+
+          <div class="decrypted-actions mt-12" style="flex-wrap: wrap; gap: 8px;">
+            <button type="button" id="copySignedHexBtn" class="btn btn-secondary">
+              📋 คัดลอก Signed Raw TX Hex
+            </button>
+            <button type="button" id="saveSignedHexFileBtn" class="btn btn-secondary">
+              💾 บันทึกไฟล์ Transaction Hex (.hex/.txt) ไป Broadcast เอง
+            </button>
+            <button type="button" id="copyPsbtBtn" class="btn btn-secondary">
+              📋 คัดลอก PSBT (Base64)
+            </button>
+            <button type="button" id="broadcastTxBtn" class="btn btn-primary">
+              📡 Broadcast โอนเงินเข้าสู่เครือข่ายทันที
+            </button>
+            <a
+              href="https://mempool.space/tx/push"
+              target="_blank"
+              rel="noopener noreferrer"
+              id="openMempoolPushBtn"
+              class="btn btn-secondary"
+              style="text-decoration: none; display: inline-flex; align-items: center;"
+            >
+              🌐 เปิดหน้า https://mempool.space/tx/push
+            </a>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- =================================================================== -->
+    <!-- DOUBLE CONFIRMATION MODAL FOR RESET PROGRAM                         -->
+    <!-- =================================================================== -->
+    <div id="resetConfirmModal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+      <div class="modal-card">
+        <div class="modal-icon">⚠️</div>
+        <h3>ยืนยันการเริ่มต้นตั้งค่าใหม่ (Reset Program)</h3>
+        <p id="resetModalDescription">
+          คุณกำลังจะลบข้อมูล Seedphrase ที่เข้ารหัสไว้ทั้งหมดอย่างถาวร (3-Pass Zero-Wipe) เพื่อเริ่มต้นตั้งค่าโปรแกรมใหม่ ข้อมูลที่ถูกลบจะไม่สามารถกู้คืนได้ไม่ว่ากรณีใดๆ
+        </p>
+
+        <!-- Step 1 Confirmation -->
+        <div id="resetConfirmStep1" class="modal-step">
+          <p class="step-prompt"><strong>ชั้นที่ 1:</strong> คุณแน่ใจหรือไม่ว่าต้องการล้างข้อมูลและเริ่มต้นตั้งค่าใหม่?</p>
+          <div class="modal-buttons">
+            <button type="button" id="cancelResetBtn1" class="btn btn-secondary">ยกเลิก</button>
+            <button type="button" id="proceedResetStep2Btn" class="btn btn-danger">ต้องการเริ่มต้นใหม่ (ไปชั้นยืนยันสุดท้าย)</button>
+          </div>
+        </div>
+
+        <!-- Step 2 Confirmation (Prevent accidental click) -->
+        <div id="resetConfirmStep2" class="modal-step hidden">
+          <p class="step-prompt">
+            <strong>ชั้นที่ 2 (ป้องกันการกดผิด):</strong> กรุณาพิมพ์คำว่า <code>RESET</code> ลงในช่องด้านล่างเพื่อยืนยันการลบข้อมูลถาวร
+          </p>
+          <input
+            type="text"
+            id="resetConfirmTextInput"
+            class="text-input text-center"
+            placeholder="พิมพ์คำว่า RESET"
+            autocomplete="off"
+          />
+          <div class="modal-buttons mt-16">
+            <button type="button" id="cancelResetBtn2" class="btn btn-secondary">ยกเลิก</button>
+            <button type="button" id="confirmFinalResetBtn" class="btn btn-danger" disabled>
+              🔥 ยืนยันลบข้อมูลถาวรและรีเซ็ตโปรแกรม
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- =================================================================== -->
+    <!-- TREZOR 3x3 BLIND PIN MATRIX MODAL                                   -->
+    <!-- =================================================================== -->
+    <div id="trezorPinModal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+      <div class="modal-card" style="max-width: 380px;">
+        <div class="modal-icon">🔢</div>
+        <h3>กรอกรหัส PIN ของเครื่อง Trezor</h3>
+        <p class="subtitle">
+          ดูตำแหน่งตัวเลขบนหน้าจอเครื่อง Trezor ของคุณ แล้วกดปุ่มตำแหน่งที่ตรงกันด้านล่าง (Blind Matrix)
+        </p>
+        <input
+          type="password"
+          id="trezorPinDisplayInput"
+          class="text-input text-center mt-10"
+          readonly
+          placeholder="●●●●"
+          style="letter-spacing: 6px; font-size: 1.2rem;"
+        />
+        <div class="trezor-pin-grid mt-12" style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;">
+          <button type="button" class="btn btn-secondary trezor-pin-btn" data-digit="7" style="font-size: 1.3rem; padding: 14px;">●</button>
+          <button type="button" class="btn btn-secondary trezor-pin-btn" data-digit="8" style="font-size: 1.3rem; padding: 14px;">●</button>
+          <button type="button" class="btn btn-secondary trezor-pin-btn" data-digit="9" style="font-size: 1.3rem; padding: 14px;">●</button>
+          <button type="button" class="btn btn-secondary trezor-pin-btn" data-digit="4" style="font-size: 1.3rem; padding: 14px;">●</button>
+          <button type="button" class="btn btn-secondary trezor-pin-btn" data-digit="5" style="font-size: 1.3rem; padding: 14px;">●</button>
+          <button type="button" class="btn btn-secondary trezor-pin-btn" data-digit="6" style="font-size: 1.3rem; padding: 14px;">●</button>
+          <button type="button" class="btn btn-secondary trezor-pin-btn" data-digit="1" style="font-size: 1.3rem; padding: 14px;">●</button>
+          <button type="button" class="btn btn-secondary trezor-pin-btn" data-digit="2" style="font-size: 1.3rem; padding: 14px;">●</button>
+          <button type="button" class="btn btn-secondary trezor-pin-btn" data-digit="3" style="font-size: 1.3rem; padding: 14px;">●</button>
+        </div>
+        <div class="modal-buttons mt-16">
+          <button type="button" id="trezorPinClearBtn" class="btn btn-secondary">⌫ ล้าง</button>
+          <button type="button" id="trezorPinCancelBtn" class="btn btn-secondary">ยกเลิก</button>
+          <button type="button" id="trezorPinSubmitBtn" class="btn btn-primary">ยืนยัน PIN</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

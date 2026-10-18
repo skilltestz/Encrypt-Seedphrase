@@ -1,0 +1,22 @@
+{
+  "name": "seedvault-zero-knowledge",
+  "version": "1.0.0",
+  "description": "Cross-Platform Zero-Knowledge Seedphrase Encryption Vault (Windows, macOS, Tails OS) with AES-256-GCM, Shamir K-of-N Secret Sharing, Portable Attempt Counter & Self-Destruct Wipe",
+  "main": "app-server.js",
+  "bin": "app-server.js",
+  "scripts": {
+    "start": "node app-server.js",
+    "test": "node test-suite.js"
+  },
+  "pkg": {
+    "assets": [
+      "ui/**/*"
+    ],
+    "targets": [
+      "node18-win-x64",
+      "node18-macos-arm64",
+      "node18-macos-x64",
+      "node18-linux-x64"
+    ]
+  }
+}
