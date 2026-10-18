@@ -600,7 +600,7 @@
       gameStageContainer.appendChild(grid);
       gameStageContainer.appendChild(replayBtn);
       playSequence();
-    } else {
+    } else if (session.gameType === 'orbital_lock') {
       const targets = session.challenge.targets;
       const sliders = [];
 
@@ -634,6 +634,172 @@
         const verifyRes = await apiPost('/api/game/verify', {
           sessionId: session.sessionId,
           submission: angles,
+        });
+        const vData = await verifyRes.json();
+        await handleVerificationResponse(vData);
+      });
+      gameStageContainer.appendChild(verifyBtn);
+    } else if (session.gameType === 'chroma_slider') {
+      const ch = session.challenge;
+      const targetSample = ch.colorSample;
+
+      const info = document.createElement('p');
+      info.textContent = 'เลื่อนแถบสีด้านล่างเพื่อให้กล่อง "สีของคุณ" ตรงกับ "สีเป้าหมาย"';
+      gameStageContainer.appendChild(info);
+
+      const compBox = document.createElement('div');
+      compBox.className = 'color-match-wrapper';
+      compBox.innerHTML = `
+        <div class="color-box-item">
+          <div class="color-swatch target-swatch" style="background-color: ${targetSample};"></div>
+          <span class="color-box-label">🎯 สีเป้าหมาย</span>
+        </div>
+        <div class="color-box-item">
+          <div class="color-swatch user-swatch" id="userColorSwatch" style="background-color: hsl(0, 85%, 55%);"></div>
+          <span class="color-box-label">🎨 สีของคุณ</span>
+        </div>
+      `;
+      gameStageContainer.appendChild(compBox);
+
+      const sliderWrap = document.createElement('div');
+      sliderWrap.className = 'mt-12';
+      sliderWrap.style.width = '100%';
+      sliderWrap.style.maxWidth = '420px';
+      sliderWrap.innerHTML = `
+        <input type="range" min="0" max="360" value="0" class="full-width chroma-range" id="chromaRangeInput" />
+      `;
+      const range = sliderWrap.querySelector('#chromaRangeInput');
+      const userSwatch = compBox.querySelector('#userColorSwatch');
+      range.addEventListener('input', () => {
+        userSwatch.style.backgroundColor = `hsl(${range.value}, 85%, 55%)`;
+      });
+      gameStageContainer.appendChild(sliderWrap);
+
+      const verifyBtn = document.createElement('button');
+      verifyBtn.type = 'button';
+      verifyBtn.className = 'btn btn-primary mt-12';
+      verifyBtn.textContent = 'ยืนยันเฉดสี';
+      verifyBtn.addEventListener('click', async () => {
+        const verifyRes = await apiPost('/api/game/verify', {
+          sessionId: session.sessionId,
+          submission: Number(range.value),
+        });
+        const vData = await verifyRes.json();
+        await handleVerificationResponse(vData);
+      });
+      gameStageContainer.appendChild(verifyBtn);
+    } else if (session.gameType === 'glyph_outlier') {
+      const ch = session.challenge;
+      const info = document.createElement('p');
+      info.textContent = 'แตะเลือกสัญลักษณ์ 1 ชิ้นที่ไม่เข้าพวก เพื่อยืนยันว่าคุณคือมนุษย์';
+      gameStageContainer.appendChild(info);
+
+      const grid = document.createElement('div');
+      grid.className = 'outlier-glyph-grid';
+      ch.items.forEach((item) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'glyph-tile-btn';
+        btn.textContent = item.icon;
+        btn.addEventListener('click', async () => {
+          btn.classList.add('selected');
+          const verifyRes = await apiPost('/api/game/verify', {
+            sessionId: session.sessionId,
+            submission: item.id,
+          });
+          const vData = await verifyRes.json();
+          await handleVerificationResponse(vData);
+        });
+        grid.appendChild(btn);
+      });
+      gameStageContainer.appendChild(grid);
+    } else if (session.gameType === 'bubble_sequence') {
+      const ch = session.challenge;
+      const userSequence = [];
+      const info = document.createElement('p');
+      info.innerHTML = `แตะฟองตัวเลขเรียงจาก <strong>น้อยไปมาก</strong> (${ch.correctSequence.join(' ➔ ')})`;
+      gameStageContainer.appendChild(info);
+
+      const wrap = document.createElement('div');
+      wrap.className = 'bubble-seq-wrapper';
+
+      ch.bubbles.forEach((b) => {
+        const bubbleBtn = document.createElement('button');
+        bubbleBtn.type = 'button';
+        bubbleBtn.className = 'bubble-seq-btn';
+        bubbleBtn.textContent = b.value;
+        bubbleBtn.addEventListener('click', async () => {
+          if (bubbleBtn.classList.contains('popped')) return;
+          bubbleBtn.classList.add('popped');
+          userSequence.push(b.value);
+
+          if (userSequence.length === ch.count) {
+            const verifyRes = await apiPost('/api/game/verify', {
+              sessionId: session.sessionId,
+              submission: userSequence,
+            });
+            const vData = await verifyRes.json();
+            await handleVerificationResponse(vData);
+          }
+        });
+        wrap.appendChild(bubbleBtn);
+      });
+      gameStageContainer.appendChild(wrap);
+
+      const resetBtn = document.createElement('button');
+      resetBtn.type = 'button';
+      resetBtn.className = 'btn btn-secondary btn-sm mt-12';
+      resetBtn.textContent = '🔄 รีเซ็ตลำดับการกด';
+      resetBtn.addEventListener('click', () => {
+        userSequence.length = 0;
+        wrap.querySelectorAll('.bubble-seq-btn').forEach((b) => b.classList.remove('popped'));
+      });
+      gameStageContainer.appendChild(resetBtn);
+    } else if (session.gameType === 'puzzle_slider') {
+      const ch = session.challenge;
+      const targetX = ch.targetPercent;
+      const tolerance = ch.tolerance;
+
+      const info = document.createElement('p');
+      info.textContent = 'ลากแถบกุญแจให้เข้าไปล็อกในช่องเป้าหมายสีทอง';
+      gameStageContainer.appendChild(info);
+
+      const track = document.createElement('div');
+      track.className = 'puzzle-track-container';
+      track.innerHTML = `
+        <div class="puzzle-track-line">
+          <div class="puzzle-target-slot" style="left: ${targetX}%;"></div>
+        </div>
+        <input type="range" min="0" max="100" value="0" class="puzzle-range-input" />
+        <div class="puzzle-status-indicator mt-8"><span class="lock-status-badge">กำลังลาก...</span></div>
+      `;
+      const rng = track.querySelector('.puzzle-range-input');
+      const badge = track.querySelector('.lock-status-badge');
+      const targetSlot = track.querySelector('.puzzle-target-slot');
+
+      rng.addEventListener('input', () => {
+        const val = Number(rng.value);
+        const inRange = Math.abs(val - targetX) <= tolerance;
+        if (inRange) {
+          badge.textContent = '✨ ตรงเป้าหมายแล้ว! (พร้อมยืนยัน)';
+          badge.className = 'lock-status-badge in-slot';
+          targetSlot.classList.add('aligned');
+        } else {
+          badge.textContent = `พิกัดปัจจุบัน: ${val}% (เป้าหมาย: ~${targetX}%)`;
+          badge.className = 'lock-status-badge';
+          targetSlot.classList.remove('aligned');
+        }
+      });
+      gameStageContainer.appendChild(track);
+
+      const verifyBtn = document.createElement('button');
+      verifyBtn.type = 'button';
+      verifyBtn.className = 'btn btn-primary mt-12';
+      verifyBtn.textContent = 'ล็อกตำแหน่งกุญแจ';
+      verifyBtn.addEventListener('click', async () => {
+        const verifyRes = await apiPost('/api/game/verify', {
+          sessionId: session.sessionId,
+          submission: Number(rng.value),
         });
         const vData = await verifyRes.json();
         await handleVerificationResponse(vData);

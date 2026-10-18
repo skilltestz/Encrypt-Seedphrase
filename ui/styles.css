@@ -878,3 +878,187 @@ body {
   padding: 10px 14px;
   font-size: 13.5px;
 }
+
+/* ========================================================================= */
+/* Additional Mini-Games (Anti-Bot Pipeline)                                 */
+/* ========================================================================= */
+/* 3. Chroma Spectrum Match */
+.color-match-wrapper {
+  display: flex;
+  gap: 20px;
+  justify-content: center;
+  align-items: center;
+  margin: 16px 0 10px;
+}
+.color-box-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.color-swatch {
+  width: 90px;
+  height: 90px;
+  border-radius: 12px;
+  border: 3px solid rgba(255, 255, 255, 0.2);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  transition: background-color 0.08s ease;
+}
+.color-box-label {
+  font-size: 12.5px;
+  color: #94a3b8;
+  font-weight: 600;
+}
+.chroma-range {
+  background: linear-gradient(
+    to right,
+    hsl(0, 85%, 55%),
+    hsl(60, 85%, 55%),
+    hsl(120, 85%, 55%),
+    hsl(180, 85%, 55%),
+    hsl(240, 85%, 55%),
+    hsl(300, 85%, 55%),
+    hsl(360, 85%, 55%)
+  );
+  height: 12px;
+  border-radius: 6px;
+  outline: none;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  cursor: pointer;
+}
+
+/* 4. Spot the Outlier */
+.outlier-glyph-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 70px);
+  gap: 12px;
+  justify-content: center;
+  margin: 18px 0;
+}
+@media (max-width: 480px) {
+  .outlier-glyph-grid {
+    grid-template-columns: repeat(3, 65px);
+  }
+}
+.glyph-tile-btn {
+  width: 70px;
+  height: 70px;
+  background: var(--bg-card-elevated);
+  border: 2px solid var(--border-color);
+  border-radius: 12px;
+  font-size: 30px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+.glyph-tile-btn:hover {
+  transform: translateY(-2px);
+  border-color: #3b82f6;
+  background: rgba(59, 130, 246, 0.15);
+}
+.glyph-tile-btn.selected {
+  border-color: #10b981;
+  background: rgba(16, 185, 129, 0.25);
+  box-shadow: 0 0 16px rgba(16, 185, 129, 0.6);
+}
+
+/* 5. Ascending Number Tap */
+.bubble-seq-wrapper {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  flex-wrap: wrap;
+  max-width: 420px;
+  margin: 18px 0;
+}
+.bubble-seq-btn {
+  width: 58px;
+  height: 58px;
+  border-radius: 50%;
+  background: var(--bg-card-elevated);
+  border: 2px solid #3b82f6;
+  color: #93c5fd;
+  font-size: 20px;
+  font-weight: 700;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
+  transition: all 0.15s ease;
+  user-select: none;
+}
+.bubble-seq-btn:hover:not(.popped) {
+  transform: scale(1.1);
+  border-color: #60a5fa;
+  box-shadow: 0 0 14px rgba(59, 130, 246, 0.5);
+}
+.bubble-seq-btn.popped {
+  background: #10b981;
+  border-color: #6ee7b7;
+  color: #ffffff;
+  transform: scale(0.92);
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* 6. Slide to Snap */
+.puzzle-track-container {
+  width: 100%;
+  max-width: 400px;
+  position: relative;
+  margin: 20px 0 14px;
+}
+.puzzle-track-line {
+  position: relative;
+  width: 100%;
+  height: 24px;
+  background: var(--bg-input);
+  border: 2px solid var(--border-color);
+  border-radius: 12px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+.puzzle-target-slot {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 32px;
+  transform: translateX(-50%);
+  background: rgba(234, 179, 8, 0.35);
+  border: 2px dashed #eab308;
+  border-radius: 6px;
+  box-shadow: 0 0 8px rgba(234, 179, 8, 0.5);
+  transition: all 0.15s ease;
+}
+.puzzle-target-slot.aligned {
+  background: rgba(16, 185, 129, 0.45);
+  border-color: #10b981;
+  box-shadow: 0 0 14px rgba(16, 185, 129, 0.8);
+}
+.puzzle-range-input {
+  width: 100%;
+  cursor: pointer;
+}
+.puzzle-status-indicator {
+  text-align: center;
+}
+.lock-status-badge {
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 99px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #94a3b8;
+  background: var(--bg-card-elevated);
+  border: 1px solid var(--border-color);
+}
+.lock-status-badge.in-slot {
+  color: #34d399;
+  background: rgba(16, 185, 129, 0.18);
+  border-color: #10b981;
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.4);
+}

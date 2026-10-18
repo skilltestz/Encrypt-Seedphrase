@@ -167,7 +167,29 @@ function runAllTests() {
   assert.strictEqual(stage2Res.verified, true, 'Must issue pass token after completing all 2 games');
   assert.strictEqual(stage2Res.allCompleted, true);
   assert.strictEqual(games.validateGamePassToken(stage2Res.gamePassToken), true);
-  console.log('  ✅ ผ่าน: บังคับผ่านครบทุกด่านเกมส์ต่อเนื่องจึงจะออก Cryptographic Pass Token ให้กรอกรหัสผ่านได้\n');
+
+  // Test 4B: Verify all 4 new mini-games individually
+  // 1. Chroma Slider
+  const chromaSession = games.createChallengeSession({ gameType: 'chroma_slider', requiredGamesCount: 1 });
+  const chromaRes = games.verifyChallengeSession(chromaSession.sessionId, chromaSession.challenge.targetHue);
+  assert.strictEqual(chromaRes.verified, true, 'Chroma slider match must succeed');
+
+  // 2. Glyph Outlier
+  const glyphSession = games.createChallengeSession({ gameType: 'glyph_outlier', requiredGamesCount: 1 });
+  const glyphRes = games.verifyChallengeSession(glyphSession.sessionId, glyphSession.challenge.outlierIndex);
+  assert.strictEqual(glyphRes.verified, true, 'Glyph outlier pick must succeed');
+
+  // 3. Bubble Sequence
+  const bubbleSession = games.createChallengeSession({ gameType: 'bubble_sequence', requiredGamesCount: 1 });
+  const bubbleRes = games.verifyChallengeSession(bubbleSession.sessionId, bubbleSession.challenge.correctSequence);
+  assert.strictEqual(bubbleRes.verified, true, 'Bubble sequence ascending tap must succeed');
+
+  // 4. Puzzle Slider
+  const puzzleSession = games.createChallengeSession({ gameType: 'puzzle_slider', requiredGamesCount: 1 });
+  const puzzleRes = games.verifyChallengeSession(puzzleSession.sessionId, puzzleSession.challenge.targetPercent);
+  assert.strictEqual(puzzleRes.verified, true, 'Puzzle slider snap must succeed');
+
+  console.log('  ✅ ผ่าน: บังคับผ่านครบทุกด่านเกมส์ต่อเนื่อง + ตรวจสอบมินิเกมส์ทั้ง 6 รูปแบบทำงานสมบูรณ์ 100%\n');
 
   // -------------------------------------------------------------------------
   // TEST 5: Bitcoin BIP86 Taproot + BIP84 SegWit + Direct Hardware Wallet Mode & Multi-UTXO
