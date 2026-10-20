@@ -502,7 +502,10 @@
         gameChain: gameConfig.gameChain || [],
       });
       const data = await res.json();
-      if (!data.ok) return;
+      if (!data.ok) {
+        showAlert(data.error || 'ไม่สามารถเริ่มด่านเกมได้ กรุณารอสักครู่แล้วลองใหม่', 'warning');
+        return;
+      }
 
       activeGameSession = data.session;
       renderInteractiveGameStage(activeGameSession);
@@ -717,7 +720,7 @@
       const ch = session.challenge;
       const userSequence = [];
       const info = document.createElement('p');
-      info.innerHTML = `แตะฟองตัวเลขเรียงจาก <strong>น้อยไปมาก</strong> (${ch.correctSequence.join(' ➔ ')})`;
+      info.innerHTML = 'แตะฟองตัวเลขเรียงจาก <strong>น้อยไปมาก</strong>';
       gameStageContainer.appendChild(info);
 
       const wrap = document.createElement('div');
@@ -758,7 +761,7 @@
     } else if (session.gameType === 'puzzle_slider') {
       const ch = session.challenge;
       const targetX = ch.targetPercent;
-      const tolerance = ch.tolerance;
+      const tolerance = 3; // visual hint only; the real tolerance is checked server-side
 
       const info = document.createElement('p');
       info.textContent = 'ลากแถบกุญแจให้เข้าไปล็อกในช่องเป้าหมายสีทอง';
@@ -830,6 +833,10 @@
       const res = await apiPost('/api/unlock', credentials);
       const data = await res.json();
 
+      // The pass token is single-use: it is burned by every attempt, so the next attempt needs a
+      // fresh game round. Clear it now; the game is restarted below if the vault stays locked.
+      currentGamePassToken = '';
+
       if (data.success && data.payload) {
         hideAlert();
         await renderDecryptedSeedView(data);
@@ -844,11 +851,90 @@
           remainingAttemptsDisplay.textContent = String(data.remainingAttempts);
         }
         showAlert(data.error, 'error');
+        if (currentVaultStatus && currentVaultStatus.gameModule && currentVaultStatus.gameModule.enabled) {
+          unlockCredentialsCard.classList.add('hidden');
+          gameShieldCard.classList.remove('hidden');
+          await startGameChallenge(currentVaultStatus.gameModule);
+        }
       }
     } catch (err) {
       showAlert(`เกิดข้อผิดพลาดในการตรวจสอบรหัสผ่าน: ${err.message}`);
     }
   });
+
+  // =========================================================================
+  // Device migration: Flash Drive <-> this device
+  // =========================================================================
+  const importVaultBtn = document.getElementById('importVaultBtn');
+  const exportVaultBtn = document.getElementById('exportVaultBtn');
+  const importVaultFileInput = document.getElementById('importVaultFileInput');
+  const importReplaceExisting = document.getElementById('importReplaceExisting');
+
+  function bytesToBase64(bytes) {
+    let bin = '';
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    }
+    return btoa(bin);
+  }
+
+  if (importVaultBtn) {
+    importVaultBtn.addEventListener('click', async () => {
+      const file = importVaultFileInput.files && importVaultFileInput.files[0];
+      if (!file) {
+        showAlert('กรุณาเลือกไฟล์ seedvault.dat จาก Flash Drive ก่อน', 'warning');
+        return;
+      }
+      try {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const res = await apiPost('/api/vault/import', {
+          fileBase64: bytesToBase64(bytes),
+          replaceExisting: Boolean(importReplaceExisting.checked),
+        });
+        const data = await res.json();
+        if (!data.ok) {
+          showAlert(data.error || 'นำเข้าไม่สำเร็จ', 'error');
+          return;
+        }
+        importVaultFileInput.value = '';
+        importReplaceExisting.checked = false;
+        showAlert('นำเข้า Vault ลงเครื่องนี้เรียบร้อย พร้อมใช้งานแบบออฟไลน์', 'success');
+        await refreshAppStatus();
+      } catch (err) {
+        showAlert(`นำเข้าไม่สำเร็จ: ${err.message}`, 'error');
+      }
+    });
+  }
+
+  if (exportVaultBtn) {
+    exportVaultBtn.addEventListener('click', async () => {
+      try {
+        const res = await apiPost('/api/vault/export', {});
+        const data = await res.json();
+        if (!data.ok) {
+          showAlert(data.error || 'ส่งออกไม่สำเร็จ', 'error');
+          return;
+        }
+        const bin = atob(data.fileBase64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        const blob = new Blob([bytes], { type: 'application/octet-stream' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = data.filename || 'seedvault.dat';
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => {
+          URL.revokeObjectURL(a.href);
+          a.remove();
+        }, 500);
+        showAlert('ส่งออกไฟล์ล่าสุดแล้ว — นำไปวางทับไฟล์เดิมบน Flash Drive เพื่อเก็บสถานะล่าสุด', 'success');
+      } catch (err) {
+        showAlert(`ส่งออกไม่สำเร็จ: ${err.message}`, 'error');
+      }
+    });
+  }
 
   // =========================================================================
   // 3. Direct Hardware Wallet Mode (WITHOUT Unlocking 24-Word Vault!)

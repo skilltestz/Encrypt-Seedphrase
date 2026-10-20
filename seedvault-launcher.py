@@ -370,9 +370,39 @@ def unpack_fixed_size_payload(decrypted_bytes: bytes) -> dict:
 # ============================================================================
 # 4. Vault Storage & Self-Destruct Manager (Python Twin of vault-storage.js)
 # ============================================================================
+def resolve_default_data_dir() -> str:
+    """Per-device data directory. The vault the app actually runs on lives HERE (internal disk of
+    the Mac / PC / Tails), never on the Flash Drive, which only carries a master copy that is
+    imported before use. Override with SEEDVAULT_DATA_DIR."""
+    env = os.environ.get("SEEDVAULT_DATA_DIR")
+    if env:
+        return os.path.abspath(env)
+    home = os.path.expanduser("~")
+    if sys.platform == "darwin":
+        return os.path.join(home, "Library", "Application Support", "SeedVault")
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or os.path.join(home, "AppData", "Local")
+        return os.path.join(base, "SeedVault")
+    return os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.join(home, ".local", "share"), "seedvault")
+
+
+def is_likely_removable_path(p: str) -> bool:
+    ap = os.path.abspath(p)
+    if sys.platform == "darwin":
+        return ap.startswith("/Volumes/")
+    if sys.platform == "win32":
+        sys_drive = (os.environ.get("SystemDrive") or "C:").upper()
+        return os.path.splitdrive(ap)[0].upper() != sys_drive
+    return ap.startswith(("/media/", "/run/media/", "/mnt/"))
+
+
 class PyVaultStorageManager:
     def __init__(self, storage_dir: str = BASE_DIR):
         self.storage_dir = storage_dir
+        try:
+            os.makedirs(storage_dir, mode=0o700, exist_ok=True)
+        except Exception:
+            pass
         self.vault_path = os.path.join(storage_dir, "seedvault.dat")
         self.portable_anchor_path = os.path.join(storage_dir, ".svlt_state.anchor")
         self.os_anchor_paths = self._resolve_os_anchor_paths()
@@ -717,8 +747,7 @@ class PyVaultStorageManager:
         }
 
     def initialize_new_vault(self, cfg: dict):
-        if os.path.exists(self.vault_path):
-            self.secure_wipe_and_reset("Re-initializing new vault")
+        # Build + validate FIRST so a rejected configuration can never destroy an existing vault.
 
         words = [w.strip().lower() for w in cfg.get("words", []) if isinstance(w, str) and w.strip()]
         if len(words) not in ALLOWED_WORD_COUNTS:
@@ -853,8 +882,69 @@ class PyVaultStorageManager:
             "keySlots": key_slots,
             "encryptedPayload": encrypted_payload,
         }
+        # A 4-digit PIN alone is only 10^4 guesses; refuse any slot unlockable by the PIN by itself.
+        if any(s["slotType"] == "PHONE_ONLY" for s in key_slots):
+            raise ValueError(
+                "ไม่อนุญาตให้ใช้เบอร์โทร 4 หลักเพียงอย่างเดียวในการปลดล็อก (เดาได้ครบใน 1–2 ชั่วโมงหากไฟล์หลุด) "
+                "กรุณาใช้โหมด \"ต้องตอบคำถาม และ กรอกเบอร์/รหัสพิเศษ\" หรือโหมดเข้มงวดสูงสุด และปิดตัวเลือกทางด่วนเบอร์โทร"
+            )
+        if os.path.exists(self.vault_path):
+            self.secure_wipe_and_reset("Re-initializing new vault")
         self._save_vault_disk_state(inner_vault)
         return self.get_public_status()
+
+    def import_vault_file(self, file_bytes: bytes, replace_existing: bool = False):
+        """Import a seedvault.dat carried on a Flash Drive into THIS device. Never destroys anything
+        on a rejected import (stale / foreign / garbage files are simply refused)."""
+        try:
+            env = json.loads(bytes(file_bytes).decode("utf-8"))
+        except Exception:
+            raise ValueError("ไฟล์ที่เลือกไม่ใช่ seedvault.dat ที่ถูกต้อง")
+        if (
+            not isinstance(env, dict)
+            or env.get("magic") != MAGIC_HEADER
+            or not isinstance(env.get("vaultId"), str)
+            or not isinstance(env.get("seq"), int)
+            or not isinstance(env.get("failedAttempts"), int)
+            or not env.get("outerEncrypted")
+        ):
+            raise ValueError("ไฟล์ที่เลือกไม่ใช่ seedvault.dat ที่ถูกต้อง")
+
+        obs = self._read_max_observed_state(env["vaultId"])
+        if obs["wiped"]:
+            raise ValueError("Vault นี้ถูกทำลายบนเครื่องนี้ไปแล้ว ไม่สามารถนำเข้าซ้ำได้ (ใช้ไฟล์ล่าสุดจากเครื่องที่ใช้งานล่าสุด)")
+        if obs["anyAnchorFound"] and (env["seq"] < obs["maxSeq"] or env["failedAttempts"] < obs["maxFailed"]):
+            raise ValueError(
+                "ไฟล์นี้เก่ากว่าสถานะที่เครื่องนี้เคยบันทึกไว้ จึงไม่ถูกนำเข้า (ป้องกันการย้อนจำนวนครั้ง) — "
+                "ให้ส่งออกไฟล์ล่าสุดจากเครื่องนี้แทน หรือใช้ไฟล์ที่ใหม่กว่า"
+            )
+
+        if os.path.exists(self.vault_path):
+            try:
+                with open(self.vault_path, "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+            except Exception:
+                existing = None
+            same = bool(existing) and existing.get("vaultId") == env["vaultId"]
+            if same and isinstance(existing.get("seq"), int) and existing["seq"] > env["seq"]:
+                raise ValueError("เครื่องนี้มีไฟล์ Vault เดียวกันที่ใหม่กว่าอยู่แล้ว จึงไม่ถูกนำเข้า")
+            if not same and not replace_existing:
+                raise ValueError("เครื่องนี้มี Vault อื่นอยู่แล้ว การนำเข้าจะลบทำลายของเดิม — ยืนยันการแทนที่ก่อนนำเข้า")
+            if not same:
+                self.secure_wipe_and_reset("Replaced by imported vault")
+
+        self._write_buffer_in_place(self.vault_path, bytes(file_bytes))
+        inner = self._load_vault_disk_state()  # verifies integrity + syncs this device's anchors
+        if not inner:
+            raise ValueError("นำเข้าไม่สำเร็จ: ไฟล์ไม่ผ่านการตรวจสอบความสมบูรณ์")
+        return self.get_public_status()
+
+    def export_vault_file(self) -> bytes:
+        inner = self._load_vault_disk_state()
+        if not inner:
+            raise ValueError("ไม่พบ Vault บนเครื่องนี้ให้ส่งออก")
+        with open(self.vault_path, "rb") as f:
+            return f.read()
 
     @staticmethod
     def _combinations(arr, k):
@@ -877,6 +967,16 @@ class PyVaultStorageManager:
         factors = inner["factors"]
         kdf_ver = inner.get("kdfVersion", 1)
         q_ans = creds.get("questionAnswers") or {}
+
+        # Commit the attempt BEFORE the slow key derivation so killing the process mid-way
+        # cannot give a free, uncounted guess.
+        max_att = inner["securityCounter"]["maxAttempts"]
+        if inner["securityCounter"]["remainingAttempts"] <= 0:
+            self.secure_wipe_and_reset("กรอกรหัสผิดเกินจำนวนที่กำหนด")
+            return {"success": False, "wiped": True, "mode": "SETUP", "remainingAttempts": 0, "error": "กรอกรหัสผิดเกินจำนวนที่กำหนด ข้อมูลที่เก็บไว้ถูกลบทำลายและรีเซ็ตโปรแกรมเรียบร้อยแล้ว"}
+        inner["securityCounter"]["failedAttempts"] += 1
+        inner["securityCounter"]["remainingAttempts"] = max(0, max_att - inner["securityCounter"]["failedAttempts"])
+        self._save_vault_disk_state(inner)
 
         valid_shares = []
         if factors["hasQuestions"] and factors.get("questionMeta"):
@@ -948,12 +1048,13 @@ class PyVaultStorageManager:
                     m_key = NativeAES256GCM.decrypt(slot["wrappedMaster"], cand, f"Slot:{st}".encode("utf-8"))
                     dec_bytes = NativeAES256GCM.decrypt(inner["encryptedPayload"], m_key, b"SeedVault-PrimaryPayload-v1")
                     payload = unpack_fixed_size_payload(dec_bytes)
-                    if inner["securityCounter"]["failedAttempts"] > 0:
-                        inner["securityCounter"]["failedAttempts"] = 0
-                        inner["securityCounter"]["remainingAttempts"] = inner["securityCounter"]["maxAttempts"]
-                        inner["vaultId"] = str(uuid.uuid4())
-                        inner["monotonicSeq"] = 0
-                        self._save_vault_disk_state(inner)
+                    # Correct: restore a full allowance under a fresh vaultId (anchors keep a monotonic
+                    # maximum of failures per vaultId and would flag a plain reset as rollback).
+                    inner["securityCounter"]["failedAttempts"] = 0
+                    inner["securityCounter"]["remainingAttempts"] = inner["securityCounter"]["maxAttempts"]
+                    inner["vaultId"] = str(uuid.uuid4())
+                    inner["monotonicSeq"] = 0
+                    self._save_vault_disk_state(inner)
                     return {
                         "success": True,
                         "matchedSlot": st,
@@ -965,10 +1066,8 @@ class PyVaultStorageManager:
                 except Exception:
                     continue
 
-        # Failed attempt
-        inner["securityCounter"]["failedAttempts"] += 1
-        rem = max(0, inner["securityCounter"]["maxAttempts"] - inner["securityCounter"]["failedAttempts"])
-        inner["securityCounter"]["remainingAttempts"] = rem
+        # Failed attempt (already counted and committed above)
+        rem = inner["securityCounter"]["remainingAttempts"]
         if rem <= 0:
             self.secure_wipe_and_reset("กรอกรหัสผิดเกินจำนวนที่กำหนด (Self-Destruct Activated)")
             return {
@@ -979,7 +1078,6 @@ class PyVaultStorageManager:
                 "maxAttempts": inner["securityCounter"]["maxAttempts"],
                 "error": "คุณกรอกรหัสผิดเกินจำนวนที่กำหนด! ข้อมูล Seedphrase ที่เข้ารหัสไว้ถูกลบทำลายอย่างถาวร (Zero-Wipe) และรีเซ็ตโปรแกรมกลับสู่โหมดเริ่มต้นใหม่แล้ว",
             }
-        self._save_vault_disk_state(inner)
         return {
             "success": False,
             "wiped": False,
@@ -1715,10 +1813,68 @@ def py_parse_raw_btc_tx(raw_hex: str) -> dict:
 # 6. Standalone Local Loopback Server for Tails OS / Linux
 # ============================================================================
 def run_standalone_python_server():
-    storage = PyVaultStorageManager(BASE_DIR)
+    data_dir = resolve_default_data_dir()
+    storage = PyVaultStorageManager(data_dir)
     csrf_token = secrets.token_hex(32)
     game_sessions = {}
-    valid_pass_tokens = set()
+    valid_pass_tokens = {}  # token -> expiry (single-use)
+    server_state = {"port": 0}
+
+    # --- Anti-bot gate policy (mirrors game-module.js) ---
+    GATE_MIN_SOLVE_S = 0.7
+    GATE_TTL_S = 300
+    GATE_MAX_WRONG = 3
+    GATE_MAX_SESSIONS = 200
+    GATE_THROTTLE_WINDOW_S = 60
+    GATE_THROTTLE_MAX_FAILS = 10
+    GATE_THROTTLE_LOCK_S = 30
+    gate = {"fail_times": [], "locked_until": 0.0}
+
+    def gate_throttled() -> bool:
+        return time.time() < gate["locked_until"]
+
+    def gate_record_failure():
+        now = time.time()
+        gate["fail_times"] = [t for t in gate["fail_times"] if now - t < GATE_THROTTLE_WINDOW_S]
+        gate["fail_times"].append(now)
+        if len(gate["fail_times"]) >= GATE_THROTTLE_MAX_FAILS:
+            gate["locked_until"] = now + GATE_THROTTLE_LOCK_S
+            gate["fail_times"] = []
+
+    def gate_purge():
+        now = time.time()
+        for sid in [k for k, v in game_sessions.items() if now - v["createdAt"] > GATE_TTL_S]:
+            game_sessions.pop(sid, None)
+        for tk in [k for k, exp in valid_pass_tokens.items() if now > exp]:
+            valid_pass_tokens.pop(tk, None)
+        while len(game_sessions) > GATE_MAX_SESSIONS:
+            game_sessions.pop(next(iter(game_sessions)), None)
+
+    def consume_pass_token(tok) -> bool:
+        exp = valid_pass_tokens.pop(tok, None) if isinstance(tok, str) else None
+        return exp is not None and time.time() <= exp
+
+    def public_challenge(gtype: str, ch: dict) -> dict:
+        # Fields that only exist to check the answer (and that the UI never needs) stay server-side.
+        if gtype == "chroma_slider":
+            return {"colorSample": ch["colorSample"]}
+        if gtype == "glyph_outlier":
+            return {"totalItems": ch["totalItems"], "items": ch["items"]}
+        if gtype == "bubble_sequence":
+            return {"count": ch["count"], "bubbles": ch["bubbles"]}
+        if gtype == "puzzle_slider":
+            return {"targetPercent": ch["targetPercent"]}
+        return ch
+
+    def public_stage(sid: str, st: dict) -> dict:
+        return {
+            "sessionId": sid,
+            "currentStageIndex": st["stageIndex"],
+            "totalStages": st["totalStages"],
+            "gameType": st["gameType"],
+            "gameName": st["gameName"],
+            "challenge": public_challenge(st["gameType"], st["challenge"]),
+        }
 
     def build_stage_challenge(gtype: str, diff: int):
         if gtype == "orbital_lock":
@@ -1744,8 +1900,9 @@ def run_standalone_python_server():
                 s_set.add(secrets.randbelow(98) + 1)
             sorted_nums = sorted(list(s_set))
             shuffled = list(sorted_nums)
-            import random
-            random.shuffle(shuffled)
+            for i in range(len(shuffled) - 1, 0, -1):  # CSPRNG Fisher-Yates
+                j = secrets.randbelow(i + 1)
+                shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
             return "Ascending Number Tap", {"count": cnt, "bubbles": [{"id": i, "value": v} for i, v in enumerate(shuffled)], "correctSequence": sorted_nums}
         if gtype == "puzzle_slider":
             tp = secrets.randbelow(60) + 28
@@ -1771,12 +1928,27 @@ def run_standalone_python_server():
             raw = self.rfile.read(length).decode("utf-8") if length > 0 else "{}"
             return json.loads(raw)
 
+        def _check_host(self):
+            # DNS-rebinding defence: only our own loopback origin is accepted.
+            port = server_state["port"]
+            allowed = {f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"}
+            if str(self.headers.get("Host", "")).lower() not in allowed:
+                raise PermissionError("Forbidden: Invalid Host header")
+            origin = self.headers.get("Origin")
+            if origin and origin not in {f"http://{h}" for h in allowed}:
+                raise PermissionError("Forbidden: Cross-origin request rejected")
+
         def _check_csrf(self):
+            self._check_host()
             tok = self.headers.get("X-SeedVault-Token", "")
             if not hmac.compare_digest(tok, csrf_token):
                 raise ValueError("Invalid session token (กรุณารีเฟรชหน้าจอ)")
 
         def do_GET(self):
+            try:
+                self._check_host()
+            except PermissionError as e:
+                return self._send_json(403, {"ok": False, "error": str(e)})
             path = urlparse(self.path).path
             if path in ("/", "/index.html"):
                 with open(os.path.join(UI_DIR, "index.html"), "r", encoding="utf-8") as f:
@@ -1817,15 +1989,30 @@ def run_standalone_python_server():
                 if path == "/api/unlock":
                     st = storage.get_public_status()
                     if st.get("initialized") and st.get("gameModule", {}).get("enabled"):
-                        if body.get("gamePassToken") not in valid_pass_tokens:
-                            return self._send_json(403, {"success": False, "error": "กรุณาเล่นด่านเกมส์ป้องกันบอทให้ผ่านครบทุกด่านก่อนกรอกรหัสผ่าน"})
+                        # Single-use: the token is burned by every attempt, right or wrong.
+                        if not consume_pass_token(body.get("gamePassToken")):
+                            return self._send_json(403, {"success": False, "needGame": True, "error": "กรุณาเล่นด่านเกมส์ป้องกันบอทให้ผ่านครบทุกด่านก่อนกรอกรหัสผ่าน (ผ่านเกมได้ 1 ครั้งต่อการกรอกรหัส 1 ครั้ง)"})
                     return self._send_json(200, storage.unlock_vault(body))
+                if path == "/api/vault/import":
+                    b64 = body.get("fileBase64")
+                    if not isinstance(b64, str) or not b64:
+                        return self._send_json(400, {"ok": False, "error": "ไม่พบไฟล์ seedvault.dat ที่จะนำเข้า"})
+                    import base64
+                    status = storage.import_vault_file(base64.b64decode(b64), bool(body.get("replaceExisting") is True))
+                    return self._send_json(200, {"ok": True, "status": status})
+                if path == "/api/vault/export":
+                    import base64
+                    data_bytes = storage.export_vault_file()
+                    return self._send_json(200, {"ok": True, "filename": "seedvault.dat", "fileBase64": base64.b64encode(data_bytes).decode("ascii")})
                 if path == "/api/reset":
                     if body.get("confirmToken") != "RESET":
                         return self._send_json(400, {"ok": False, "error": "กรุณายืนยันด้วยคำว่า RESET"})
                     res = storage.secure_wipe_and_reset("User confirmed double-step reset")
                     return self._send_json(200, {"ok": True, **res})
                 if path == "/api/game/start":
+                    if gate_throttled():
+                        return self._send_json(429, {"ok": False, "error": "ลองผิดบ่อยเกินไป กรุณารอสักครู่แล้วลองใหม่"})
+                    gate_purge()
                     sid = str(uuid.uuid4())
                     primary = body.get("gameType") or "pattern_shield"
                     diff = int(body.get("difficulty") or 1)
@@ -1835,57 +2022,68 @@ def run_standalone_python_server():
                     stages = []
                     for idx, gt in enumerate(chain):
                         gn, ch = build_stage_challenge(gt, diff)
-                        stages.append({"stageIndex": idx, "totalStages": len(chain), "gameType": gt, "gameName": gn, "challenge": ch})
-                    game_sessions[sid] = {"currentStageIndex": 0, "stages": stages}
-                    s0 = stages[0]
-                    return self._send_json(200, {"ok": True, "session": {"sessionId": sid, **s0}})
+                        stages.append({"stageIndex": idx, "totalStages": len(chain), "gameType": gt, "gameName": gn, "challenge": ch, "issuedAt": time.time() if idx == 0 else 0.0})
+                    game_sessions[sid] = {"currentStageIndex": 0, "stages": stages, "wrong": 0, "createdAt": time.time()}
+                    return self._send_json(200, {"ok": True, "session": public_stage(sid, stages[0])})
                 if path == "/api/game/verify":
+                    if gate_throttled():
+                        return self._send_json(429, {"ok": True, "verified": False, "throttled": True, "error": "ลองผิดบ่อยเกินไป กรุณารอสักครู่แล้วลองใหม่"})
+                    gate_purge()
                     sid = body.get("sessionId")
                     sess = game_sessions.get(sid)
                     if not sess:
-                        return self._send_json(200, {"ok": True, "verified": False, "error": "เซสชันหมดอายุ"})
+                        return self._send_json(200, {"ok": True, "verified": False, "sessionExpired": True, "error": "เซสชันหมดอายุ"})
                     idx = sess["currentStageIndex"]
                     st_obj = sess["stages"][idx]
                     sub = body.get("submission")
                     ch = st_obj["challenge"]
                     gt = st_obj["gameType"]
+
+                    def fail_stage(reason: str):
+                        sess["wrong"] += 1
+                        gate_record_failure()
+                        out = {"ok": True, "verified": False, "stageCleared": False, "error": reason}
+                        if sess["wrong"] >= GATE_MAX_WRONG:
+                            game_sessions.pop(sid, None)
+                            out["sessionExpired"] = True
+                            out["error"] = f"{reason} (ตอบผิดครบ {GATE_MAX_WRONG} ครั้ง ระบบสุ่มโจทย์ใหม่ให้)"
+                        return self._send_json(200, out)
+
+                    # Human-speed floor
+                    if time.time() - (st_obj.get("issuedAt") or sess["createdAt"]) < GATE_MIN_SOLVE_S:
+                        return fail_stage("ตอบเร็วผิดปกติ กรุณาเล่นด้วยตนเอง")
                     ok = False
-                    if gt == "pattern_shield":
-                        ok = isinstance(sub, list) and [int(x) for x in sub] == ch["sequence"]
-                    elif gt == "orbital_lock":
-                        ok = isinstance(sub, list) and len(sub) == len(ch["targets"]) and all(
-                            min(abs(int(sub[i]) - ch["targets"][i]) % 360, 360 - (abs(int(sub[i]) - ch["targets"][i]) % 360)) <= ch["toleranceDeg"]
-                            for i in range(len(ch["targets"]))
-                        )
-                    elif gt == "chroma_slider":
-                        try:
+                    try:
+                        if gt == "pattern_shield":
+                            ok = isinstance(sub, list) and [int(x) for x in sub] == ch["sequence"]
+                        elif gt == "orbital_lock":
+                            ok = isinstance(sub, list) and len(sub) == len(ch["targets"]) and all(
+                                min(abs(int(sub[i]) - ch["targets"][i]) % 360, 360 - (abs(int(sub[i]) - ch["targets"][i]) % 360)) <= ch["toleranceDeg"]
+                                for i in range(len(ch["targets"]))
+                            )
+                        elif gt == "chroma_slider":
                             val = float(sub)
-                            diff = abs(val - ch["targetHue"]) % 360
-                            shortest = 360 - diff if diff > 180 else diff
+                            hue_diff = abs(val - ch["targetHue"]) % 360
+                            shortest = 360 - hue_diff if hue_diff > 180 else hue_diff
                             ok = shortest <= ch["tolerance"]
-                        except Exception:
-                            ok = False
-                    elif gt == "glyph_outlier":
-                        try:
+                        elif gt == "glyph_outlier":
                             ok = int(sub) == int(ch["outlierIndex"])
-                        except Exception:
-                            ok = False
-                    elif gt == "bubble_sequence":
-                        ok = isinstance(sub, list) and [int(x) for x in sub] == ch["correctSequence"]
-                    elif gt == "puzzle_slider":
-                        try:
-                            val = float(sub)
-                            ok = abs(val - ch["targetPercent"]) <= ch["tolerance"]
-                        except Exception:
-                            ok = False
+                        elif gt == "bubble_sequence":
+                            ok = isinstance(sub, list) and [int(x) for x in sub] == ch["correctSequence"]
+                        elif gt == "puzzle_slider":
+                            ok = abs(float(sub) - ch["targetPercent"]) <= ch["tolerance"]
+                    except Exception:
+                        ok = False
                     if not ok:
-                        return self._send_json(200, {"ok": True, "verified": False, "error": "ยังไม่ผ่านด่านนี้"})
+                        return fail_stage("ยังไม่ผ่านด่านนี้")
                     sess["currentStageIndex"] += 1
                     if sess["currentStageIndex"] < len(sess["stages"]):
                         nxt = sess["stages"][sess["currentStageIndex"]]
-                        return self._send_json(200, {"ok": True, "verified": False, "stageCleared": True, "nextStage": {"sessionId": sid, **nxt}})
+                        nxt["issuedAt"] = time.time()
+                        return self._send_json(200, {"ok": True, "verified": False, "stageCleared": True, "nextStage": public_stage(sid, nxt)})
                     tok = secrets.token_hex(32)
-                    valid_pass_tokens.add(tok)
+                    valid_pass_tokens[tok] = time.time() + 300
+                    game_sessions.pop(sid, None)
                     return self._send_json(200, {"ok": True, "verified": True, "stageCleared": True, "allCompleted": True, "totalStages": len(sess["stages"]), "gamePassToken": tok})
                 if path == "/api/btc/derive":
                     w = py_derive_wallet(
@@ -1913,10 +2111,30 @@ def run_standalone_python_server():
 
     server = HTTPServer(("127.0.0.1", 0), Handler)
     port = server.server_address[1]
+    server_state["port"] = port
     url = f"http://127.0.0.1:{port}"
+
+    # Convenience for existing users: if this device has no vault yet but a seedvault.dat sits next to
+    # the app (e.g. run straight from the Flash Drive), COPY it into the local data directory.
+    legacy_file = os.path.join(BASE_DIR, "seedvault.dat")
+    if (
+        not os.path.exists(storage.vault_path)
+        and os.path.exists(legacy_file)
+        and os.path.abspath(BASE_DIR) != os.path.abspath(data_dir)
+    ):
+        try:
+            with open(legacy_file, "rb") as lf:
+                storage.import_vault_file(lf.read())
+            print(f" 📥 นำเข้า seedvault.dat จาก {legacy_file} ลงเครื่องนี้แล้ว (ไฟล์ต้นฉบับไม่ถูกแก้ไข)")
+        except Exception as e:
+            print(f" ⚠️ ไม่ได้นำเข้า seedvault.dat เดิม: {e}")
+
     print("==============================================================")
     print(" 🔐 SeedVault Zero-Knowledge Vault & Bitcoin Signer (Tails OS)")
     print(f" 🌐 เปิดใช้งานที่: {url}")
+    print(f" 💾 ข้อมูล Vault เก็บบนเครื่องนี้ที่: {data_dir}")
+    if is_likely_removable_path(BASE_DIR):
+        print(' 💡 โปรแกรมรันจาก Flash Drive แต่ข้อมูลจะถูกเก็บบนเครื่องนี้ ใช้ปุ่ม "ส่งออก" เพื่อนำไฟล์ล่าสุดกลับไปเก็บบน Flash Drive')
     print(" 🛑 กด Ctrl+C เพื่อปิดโปรแกรมเมื่อใช้งานเสร็จ")
     print("==============================================================")
     if os.environ.get("SEEDVAULT_NO_BROWSER") != "1":

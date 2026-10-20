@@ -28,6 +28,25 @@
     <!-- Notification Banner -->
     <div id="alertBanner" class="alert-banner hidden"></div>
 
+    <!-- Device migration (Flash Drive <-> this device) -->
+    <details id="deviceMigrationCard" class="card" style="max-width: 960px; margin: 12px auto; padding: 10px 18px">
+      <summary><strong>💾 ย้ายเครื่อง / Flash Drive</strong> (นำเข้า–ส่งออกไฟล์ seedvault.dat)</summary>
+      <p class="small-note mt-8">
+        โปรแกรมทำงานจากไฟล์ที่เก็บ <strong>บนเครื่องนี้</strong> เมื่อเปลี่ยนเครื่อง (MacBook / PC / Tails) ให้
+        <strong>นำเข้า</strong> ไฟล์ <code>seedvault.dat</code> จาก Flash Drive ก่อนใช้งานแบบออฟไลน์ และเมื่อใช้เสร็จให้
+        <strong>ส่งออก</strong> ไฟล์ล่าสุดกลับไปเก็บบน Flash Drive (ไฟล์ล่าสุดมีจำนวนครั้งที่กรอกผิดล่าสุดติดไปด้วย)
+      </p>
+      <div class="mt-8" style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center">
+        <input type="file" id="importVaultFileInput" accept=".dat,application/octet-stream" />
+        <label class="checkbox-label">
+          <input type="checkbox" id="importReplaceExisting" />
+          <span>แทนที่ Vault เดิมบนเครื่องนี้ (ลบทำลายของเดิม)</span>
+        </label>
+        <button type="button" id="importVaultBtn" class="btn btn-secondary btn-sm">📥 นำเข้าจาก Flash Drive</button>
+        <button type="button" id="exportVaultBtn" class="btn btn-secondary btn-sm">📤 ส่งออกไฟล์ล่าสุด</button>
+      </div>
+    </details>
+
     <!-- =================================================================== -->
     <!-- VIEW 1: FIRST-TIME SETUP MODE (การตั้งค่าครั้งแรก)                      -->
     <!-- =================================================================== -->
@@ -182,7 +201,7 @@
                   <span class="attempt-unit">ครั้ง</span>
                 </div>
                 <p class="warning-text mt-8">
-                  ⚠️ หากกรอกผิดเกินจำนวนที่กำหนด ข้อความที่เก็บไว้จะถูกลบหายไปทันที (3-Pass Zero-Wipe) และรีเซ็ตโปรแกรม แม้เปลี่ยนเครื่องคอมพิวเตอร์ก็ไม่สามารถนับจำนวนครั้งใหม่ได้
+                  ⚠️ หากกรอกผิดเกินจำนวนที่กำหนด โปรแกรมจะลบทำลายไฟล์บนเครื่องนี้ทันที — เป็นเพียงด่านป้องกันการเปิดผ่านโปรแกรม ไม่ใช่การป้องกันขั้นสุดท้าย: หากมีผู้ได้สำเนาไฟล์ไป ความปลอดภัยขึ้นอยู่กับความยากเดาของคำตอบที่ตั้งไว้เท่านั้น (ควรใช้คำตอบสุ่มยาว เช่น Seed 12 คำ) และไฟล์บน Flash Drive / สำเนาเก่าไม่ถูกลบตามไปด้วย
                 </p>
               </div>
             </div>
@@ -250,7 +269,7 @@
             <span id="remainingAttemptsDisplay">5</span>
             <span class="counter-max">/ <span id="maxAttemptsDisplay">5</span> ครั้ง</span>
           </div>
-          <div class="counter-sub">ซิงค์ผูกกับไฟล์เข้ารหัส (เปลี่ยนเครื่องไม่สามารถรีเซ็ตจำนวนครั้งได้)</div>
+          <div class="counter-sub">นับต่อเครื่องและติดไปกับไฟล์ (นำเข้าไฟล์เก่ากว่าสถานะบนเครื่องนี้ไม่ได้ — ส่งออกไฟล์ล่าสุดเมื่อใช้เสร็จ)</div>
         </div>
 
         <div class="reset-action-card">
@@ -755,7 +774,7 @@
         <div class="modal-icon">⚠️</div>
         <h3>ยืนยันการเริ่มต้นตั้งค่าใหม่ (Reset Program)</h3>
         <p id="resetModalDescription">
-          คุณกำลังจะลบข้อมูล Seedphrase ที่เข้ารหัสไว้ทั้งหมดอย่างถาวร (3-Pass Zero-Wipe) เพื่อเริ่มต้นตั้งค่าโปรแกรมใหม่ ข้อมูลที่ถูกลบจะไม่สามารถกู้คืนได้ไม่ว่ากรณีใดๆ
+          คุณกำลังจะลบข้อมูล Seedphrase ที่เข้ารหัสไว้บนเครื่องนี้ (เขียนทับหลายรอบแล้วลบ) เพื่อเริ่มต้นตั้งค่าโปรแกรมใหม่ — ไฟล์สำเนาบน Flash Drive, Time Machine หรือ Backup อื่นๆ จะไม่ถูกลบตามไปด้วย
         </p>
 
         <!-- Step 1 Confirmation -->

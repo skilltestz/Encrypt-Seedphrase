@@ -16,10 +16,23 @@
 const crypto = require('crypto');
 
 class GameGuardModuleRegistry {
-  constructor() {
+  /**
+   * @param {object} [options]
+   * @param {number} [options.minSolveMs=700]  answers faster than this are treated as bot-speed
+   */
+  constructor(options = {}) {
     this.modules = new Map();
     this.activeSessions = new Map();
-    this.validPassTokens = new Map(); // token -> { expiresAt, used }
+    this.validPassTokens = new Map(); // token -> { createdAt, expiresAt } (single-use)
+    this.minSolveMs = Number.isFinite(options.minSolveMs) ? options.minSolveMs : 700;
+    this.sessionTtlMs = 5 * 60 * 1000;
+    this.maxWrongPerSession = 3;
+    this.maxSessions = 200;
+    this.throttleWindowMs = 60 * 1000;
+    this.throttleMaxFailures = 10;
+    this.throttleLockMs = 30 * 1000;
+    this._failTimes = [];
+    this._lockedUntil = 0;
     this._registerBuiltInModules();
   }
 
@@ -167,7 +180,7 @@ class GameGuardModuleRegistry {
           numbersSet.add(crypto.randomInt(1, 99));
         }
         const sorted = Array.from(numbersSet).sort((a, b) => a - b);
-        const shuffled = [...sorted].sort(() => Math.random() - 0.5);
+        const shuffled = this._shuffle(sorted);
 
         return {
           count,
@@ -232,10 +245,84 @@ class GameGuardModuleRegistry {
   }
 
   /**
+   * Returns the part of a challenge that is safe to send to the browser.
+   * Fields that only exist to check the answer (and that the UI never needs) stay server-side.
+   * NOTE: anything the human must SEE to play (e.g. the target colour) is necessarily visible
+   * to a script too, so the real bot defences are the server-side controls below
+   * (single-use token, expiry, wrong-attempt cap, speed floor, throttling).
+   */
+  _toPublicChallenge(gameType, ch) {
+    switch (gameType) {
+      case 'chroma_slider':
+        return { colorSample: ch.colorSample };
+      case 'glyph_outlier':
+        return { totalItems: ch.totalItems, items: ch.items };
+      case 'bubble_sequence':
+        return { count: ch.count, bubbles: ch.bubbles };
+      case 'puzzle_slider':
+        return { targetPercent: ch.targetPercent };
+      default:
+        return ch;
+    }
+  }
+
+  _publicStageView(session, stage) {
+    return {
+      sessionId: session.sessionId,
+      currentStageIndex: stage.stageIndex,
+      totalStages: session.stages.length,
+      gameType: stage.gameType,
+      gameName: stage.gameName,
+      challenge: this._toPublicChallenge(stage.gameType, stage.challenge),
+    };
+  }
+
+  _purgeExpired() {
+    const now = Date.now();
+    for (const [id, s] of this.activeSessions) {
+      if (now - s.createdAt > this.sessionTtlMs) this.activeSessions.delete(id);
+    }
+    for (const [tok, rec] of this.validPassTokens) {
+      if (now > rec.expiresAt) this.validPassTokens.delete(tok);
+    }
+    while (this.activeSessions.size > this.maxSessions) {
+      this.activeSessions.delete(this.activeSessions.keys().next().value);
+    }
+  }
+
+  _recordFailure() {
+    const now = Date.now();
+    this._failTimes = this._failTimes.filter((t) => now - t < this.throttleWindowMs);
+    this._failTimes.push(now);
+    if (this._failTimes.length >= this.throttleMaxFailures) {
+      this._lockedUntil = now + this.throttleLockMs;
+      this._failTimes = [];
+    }
+  }
+
+  isThrottled() {
+    return Date.now() < this._lockedUntil;
+  }
+
+  _shuffle(arr) {
+    const a = [...arr];
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = crypto.randomInt(0, i + 1);
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  }
+
+  /**
    * Starts a single or multi-game pipeline session.
    * @param {object} gameConfig - { gameType, gameChain: string[], difficulty, requiredGamesCount }
    */
   createChallengeSession(gameConfig = {}) {
+    if (this.isThrottled()) {
+      return { throttled: true, error: 'ลองผิดบ่อยเกินไป กรุณารอสักครู่แล้วลองใหม่' };
+    }
+    this._purgeExpired();
+
     const difficulty = Number(gameConfig.difficulty || 1);
     let chain = Array.isArray(gameConfig.gameChain) && gameConfig.gameChain.length > 0
       ? gameConfig.gameChain.filter((id) => this.modules.has(id))
@@ -260,28 +347,23 @@ class GameGuardModuleRegistry {
         gameName: mod.name,
         challenge: mod.generateChallenge(difficulty),
         solved: false,
+        issuedAt: idx === 0 ? Date.now() : 0,
       };
     });
 
     const sessionId = crypto.randomUUID();
-    this.activeSessions.set(sessionId, {
+    const session = {
       sessionId,
       difficulty,
       currentStageIndex: 0,
       stages,
       allSolved: false,
+      wrongCount: 0,
       createdAt: Date.now(),
-    });
-
-    const currentStage = stages[0];
-    return {
-      sessionId,
-      currentStageIndex: 0,
-      totalStages: stages.length,
-      gameType: currentStage.gameType,
-      gameName: currentStage.gameName,
-      challenge: currentStage.challenge,
     };
+    this.activeSessions.set(sessionId, session);
+
+    return this._publicStageView(session, stages[0]);
   }
 
   /**
@@ -289,9 +371,14 @@ class GameGuardModuleRegistry {
    * Only issues `gamePassToken` when ALL configured games in the chain are solved!
    */
   verifyChallengeSession(sessionId, submission) {
+    if (this.isThrottled()) {
+      return { verified: false, throttled: true, error: 'ลองผิดบ่อยเกินไป กรุณารอสักครู่แล้วลองใหม่' };
+    }
+    this._purgeExpired();
+
     const session = this.activeSessions.get(sessionId);
     if (!session) {
-      return { verified: false, error: 'เซสชันของเกมหมดอายุ กรุณาเริ่มด่านใหม่' };
+      return { verified: false, sessionExpired: true, error: 'เซสชันของเกมหมดอายุ กรุณาเริ่มด่านใหม่' };
     }
 
     const stage = session.stages[session.currentStageIndex];
@@ -299,17 +386,42 @@ class GameGuardModuleRegistry {
       return { verified: false, error: 'ไม่พบด่านเกมปัจจุบัน' };
     }
 
-    const mod = this.modules.get(stage.gameType);
-    const passed = mod.verifySolution(stage.challenge, submission);
-
-    if (!passed) {
-      return {
+    const failStage = (reason) => {
+      session.wrongCount += 1;
+      this._recordFailure();
+      const out = {
         verified: false,
         stageCleared: false,
         currentStageIndex: session.currentStageIndex,
         totalStages: session.stages.length,
-        error: `ยังไม่ผ่านด่านที่ ${session.currentStageIndex + 1}/${session.stages.length} (${stage.gameName}) กรุณาลองใหม่อีกครั้ง`,
+        error: reason,
       };
+      if (session.wrongCount >= this.maxWrongPerSession) {
+        this.activeSessions.delete(sessionId);
+        out.sessionExpired = true;
+        out.error = `${reason} (ตอบผิดครบ ${this.maxWrongPerSession} ครั้ง ระบบสุ่มโจทย์ใหม่ให้)`;
+      }
+      return out;
+    };
+
+    // Human-speed floor: an answer that arrives faster than a person could physically give it
+    const elapsed = Date.now() - (stage.issuedAt || session.createdAt);
+    if (elapsed < this.minSolveMs) {
+      return failStage('ตอบเร็วผิดปกติ กรุณาเล่นด้วยตนเอง');
+    }
+
+    const mod = this.modules.get(stage.gameType);
+    let passed = false;
+    try {
+      passed = mod.verifySolution(stage.challenge, submission);
+    } catch (_e) {
+      passed = false;
+    }
+
+    if (!passed) {
+      return failStage(
+        `ยังไม่ผ่านด่านที่ ${session.currentStageIndex + 1}/${session.stages.length} (${stage.gameName}) กรุณาลองใหม่อีกครั้ง`
+      );
     }
 
     stage.solved = true;
@@ -318,6 +430,7 @@ class GameGuardModuleRegistry {
     // Check if more games remain in the multi-game pipeline
     if (session.currentStageIndex < session.stages.length) {
       const nextStage = session.stages[session.currentStageIndex];
+      nextStage.issuedAt = Date.now();
       return {
         verified: false,
         stageCleared: true,
@@ -325,14 +438,7 @@ class GameGuardModuleRegistry {
         sessionId: session.sessionId,
         currentStageIndex: session.currentStageIndex,
         totalStages: session.stages.length,
-        nextStage: {
-          sessionId: session.sessionId,
-          currentStageIndex: session.currentStageIndex,
-          totalStages: session.stages.length,
-          gameType: nextStage.gameType,
-          gameName: nextStage.gameName,
-          challenge: nextStage.challenge,
-        },
+        nextStage: this._publicStageView(session, nextStage),
       };
     }
 
@@ -341,7 +447,7 @@ class GameGuardModuleRegistry {
     const gamePassToken = crypto.randomBytes(32).toString('hex');
     this.validPassTokens.set(gamePassToken, {
       createdAt: Date.now(),
-      expiresAt: Date.now() + 10 * 60 * 1000, // Valid for 10 minutes
+      expiresAt: Date.now() + 5 * 60 * 1000, // Valid for 5 minutes, ONE use
     });
     this.activeSessions.delete(sessionId);
 
@@ -355,7 +461,7 @@ class GameGuardModuleRegistry {
   }
 
   /**
-   * Validates and consumes or checks a `gamePassToken` on `/api/unlock`.
+   * Non-consuming check (kept for tests / read-only inspection).
    */
   validateGamePassToken(token) {
     if (!token || typeof token !== 'string') return false;
@@ -366,6 +472,16 @@ class GameGuardModuleRegistry {
       return false;
     }
     return true;
+  }
+
+  /**
+   * Single-use consumption used by `/api/unlock`: the token is destroyed whether or not the
+   * password turns out to be right, so every password guess costs one full game round.
+   */
+  consumeGamePassToken(token) {
+    const ok = this.validateGamePassToken(token);
+    if (ok) this.validPassTokens.delete(token);
+    return ok;
   }
 }
 

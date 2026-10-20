@@ -139,7 +139,7 @@ function runAllTests() {
   // TEST 4: Multi-Stage Anti-Bot Game Pipeline (2+ Games Required Before Password)
   // -------------------------------------------------------------------------
   console.log('▶ [Test 4] ตรวจสอบระบบเล่นมากกว่า 1 เกมส์ต่อเนื่อง (Multi-Stage Anti-Bot Gatekeeper)...');
-  const games = new GameGuardModuleRegistry();
+  const games = new GameGuardModuleRegistry({ minSolveMs: 0 });
   const multiSession = games.createChallengeSession({
     gameType: 'pattern_shield',
     difficulty: 2,
@@ -168,28 +168,73 @@ function runAllTests() {
   assert.strictEqual(stage2Res.allCompleted, true);
   assert.strictEqual(games.validateGamePassToken(stage2Res.gamePassToken), true);
 
-  // Test 4B: Verify all 4 new mini-games individually
+  // Test 4B: Verify all 4 new mini-games individually.
+  // Answers are NOT sent to the browser any more, so read them from the server-side session.
+  const secretOf = (s) => games.activeSessions.get(s.sessionId).stages[0].challenge;
+
   // 1. Chroma Slider
   const chromaSession = games.createChallengeSession({ gameType: 'chroma_slider', requiredGamesCount: 1 });
-  const chromaRes = games.verifyChallengeSession(chromaSession.sessionId, chromaSession.challenge.targetHue);
+  assert.strictEqual(chromaSession.challenge.targetHue, undefined, 'targetHue must not be sent to the client');
+  const chromaRes = games.verifyChallengeSession(chromaSession.sessionId, secretOf(chromaSession).targetHue);
   assert.strictEqual(chromaRes.verified, true, 'Chroma slider match must succeed');
 
   // 2. Glyph Outlier
   const glyphSession = games.createChallengeSession({ gameType: 'glyph_outlier', requiredGamesCount: 1 });
-  const glyphRes = games.verifyChallengeSession(glyphSession.sessionId, glyphSession.challenge.outlierIndex);
+  assert.strictEqual(glyphSession.challenge.outlierIndex, undefined, 'outlierIndex must not be sent to the client');
+  const glyphRes = games.verifyChallengeSession(glyphSession.sessionId, secretOf(glyphSession).outlierIndex);
   assert.strictEqual(glyphRes.verified, true, 'Glyph outlier pick must succeed');
 
   // 3. Bubble Sequence
   const bubbleSession = games.createChallengeSession({ gameType: 'bubble_sequence', requiredGamesCount: 1 });
-  const bubbleRes = games.verifyChallengeSession(bubbleSession.sessionId, bubbleSession.challenge.correctSequence);
+  assert.strictEqual(bubbleSession.challenge.correctSequence, undefined, 'correctSequence must not be sent to the client');
+  const bubbleRes = games.verifyChallengeSession(bubbleSession.sessionId, secretOf(bubbleSession).correctSequence);
   assert.strictEqual(bubbleRes.verified, true, 'Bubble sequence ascending tap must succeed');
 
   // 4. Puzzle Slider
   const puzzleSession = games.createChallengeSession({ gameType: 'puzzle_slider', requiredGamesCount: 1 });
-  const puzzleRes = games.verifyChallengeSession(puzzleSession.sessionId, puzzleSession.challenge.targetPercent);
+  const puzzleRes = games.verifyChallengeSession(puzzleSession.sessionId, secretOf(puzzleSession).targetPercent);
   assert.strictEqual(puzzleRes.verified, true, 'Puzzle slider snap must succeed');
 
-  console.log('  ✅ ผ่าน: บังคับผ่านครบทุกด่านเกมส์ต่อเนื่อง + ตรวจสอบมินิเกมส์ทั้ง 6 รูปแบบทำงานสมบูรณ์ 100%\n');
+  // 4C: pass token is single-use
+  assert.strictEqual(games.validateGamePassToken(puzzleRes.gamePassToken), true);
+  assert.strictEqual(games.consumeGamePassToken(puzzleRes.gamePassToken), true, 'First use must succeed');
+  assert.strictEqual(games.consumeGamePassToken(puzzleRes.gamePassToken), false, 'Token must be burned after one use');
+
+  // 4D: 3 wrong answers destroy the session (cannot enumerate answers on one session)
+  const guessSession = games.createChallengeSession({ gameType: 'glyph_outlier', requiredGamesCount: 1 });
+  const correctIdx = secretOf(guessSession).outlierIndex;
+  const wrongIdx = (correctIdx + 1) % guessSession.challenge.totalItems;
+  assert.strictEqual(games.verifyChallengeSession(guessSession.sessionId, wrongIdx).verified, false);
+  assert.strictEqual(games.verifyChallengeSession(guessSession.sessionId, wrongIdx).verified, false);
+  const thirdWrong = games.verifyChallengeSession(guessSession.sessionId, wrongIdx);
+  assert.strictEqual(thirdWrong.sessionExpired, true, 'Session must die after 3 wrong answers');
+  assert.strictEqual(
+    games.verifyChallengeSession(guessSession.sessionId, correctIdx).verified,
+    false,
+    'A dead session must not accept even the correct answer'
+  );
+
+  // 4E: bot-speed answers are rejected (human-speed floor)
+  const strictGames = new GameGuardModuleRegistry({ minSolveMs: 60000 });
+  const fastSession = strictGames.createChallengeSession({ gameType: 'puzzle_slider', requiredGamesCount: 1 });
+  const fastSecret = strictGames.activeSessions.get(fastSession.sessionId).stages[0].challenge.targetPercent;
+  const fastRes = strictGames.verifyChallengeSession(fastSession.sessionId, fastSecret);
+  assert.strictEqual(fastRes.verified, false, 'Instant correct answer must be rejected as bot-speed');
+
+  // 4F: repeated failures trigger a temporary global lockout
+  const throttleGames = new GameGuardModuleRegistry({ minSolveMs: 0 });
+  for (let i = 0; i < 10; i++) {
+    const s = throttleGames.createChallengeSession({ gameType: 'puzzle_slider', requiredGamesCount: 1 });
+    if (s.throttled) break;
+    throttleGames.verifyChallengeSession(s.sessionId, -999);
+  }
+  assert.strictEqual(throttleGames.isThrottled(), true, 'Failure burst must lock the game gatekeeper');
+  assert.strictEqual(
+    Boolean(throttleGames.createChallengeSession({ gameType: 'puzzle_slider' }).throttled),
+    true
+  );
+
+  console.log('  ✅ ผ่าน: บังคับผ่านครบทุกด่านเกมส์ + มินิเกมส์ทั้ง 6 รูปแบบ + เฉลยไม่ถูกส่งไปหน้าเว็บ + Token ใช้ได้ครั้งเดียว + ตอบผิด 3 ครั้งเซสชันตาย + กันตอบเร็วระดับบอท + ล็อกชั่วคราวเมื่อลองผิดถี่\n');
 
   // -------------------------------------------------------------------------
   // TEST 5: Bitcoin BIP86 Taproot + BIP84 SegWit + Direct Hardware Wallet Mode & Multi-UTXO
@@ -429,6 +474,78 @@ function runAllTests() {
   assert.strictEqual(postWipePasteStatus.initialized, false, 'Pasting file after wipe must immediately shred it again');
   assert.strictEqual(fs.existsSync(computerBStorage.vaultPath), false, 'seedvault.dat pasted after wipe must be destroyed');
   console.log('  ✅ ผ่าน: รองรับการนำ Flash Drive ไปเปิดเครื่องอื่นได้ปกติ + ป้องกันการถอดรหัสแยกข้อ (Zero-Oracle OTP) + ทำลายไฟล์ 7 รอบทันทีเมื่อตรวจพบการ Copy-Paste ไฟล์เก่ากลับมาสุ่มรหัสซ้ำ!\n');
+
+  // -------------------------------------------------------------------------
+  // TEST 7: Device migration (import/export), PIN-only block, pre-attempt counter commit
+  // -------------------------------------------------------------------------
+  console.log('▶ [Test 7] ตรวจสอบการย้ายเครื่อง (นำเข้า/ส่งออก), การห้าม PIN อย่างเดียว และการนับครั้งก่อนคำนวณรหัส...');
+  const devA = fs.mkdtempSync(path.join(os.tmpdir(), 'seedvault-devA-'));
+  const devB = fs.mkdtempSync(path.join(os.tmpdir(), 'seedvault-devB-'));
+  const devC = fs.mkdtempSync(path.join(os.tmpdir(), 'seedvault-devC-'));
+  const isolated = (dir) => {
+    const m = new VaultStorageManager(dir);
+    m.osAnchorPaths = [path.join(dir, 'os-anchor.dat')]; // keep the test off the real home dir
+    return m;
+  };
+  const mgrA = isolated(devA);
+  const mgrB = isolated(devB);
+  const mgrC = isolated(devC);
+
+  mgrA.initializeNewVault({
+    words: words24,
+    passphrase25: '',
+    questions: [
+      { question: 'Q1', answer: 'a1' },
+      { question: 'Q2', answer: 'a2' },
+    ],
+    requiredQuestionCount: 2,
+    phoneLast4: '4321',
+    policyMode: 'QUESTIONS_AND_PIN_OR_CODE',
+    maxAttempts: 5,
+  });
+  const staleBytes = fs.readFileSync(mgrA.vaultPath);
+
+  // 7A. PIN-only configuration is refused and must NOT destroy the existing vault
+  assert.throws(
+    () => mgrA.initializeNewVault({ words: words24, phoneLast4: '1111', policyMode: 'OR_ANY' }),
+    /เบอร์โทร 4 หลัก/
+  );
+  assert.ok(staleBytes.equals(fs.readFileSync(mgrA.vaultPath)), 'Rejected setup must leave the existing vault untouched');
+
+  // 7B. A wrong attempt is committed to disk (counter 5 -> 4)
+  const wrongA = mgrA.unlockVault({ questionAnswers: { 1: 'x', 2: 'y' }, phoneLast4: '4321' });
+  assert.strictEqual(wrongA.success, false);
+  assert.strictEqual(wrongA.remainingAttempts, 4);
+
+  // 7C. Stale file (older than this device's state) is refused WITHOUT damaging the current vault
+  assert.throws(() => mgrA.importVaultFile(staleBytes), /เก่ากว่า/);
+  assert.strictEqual(mgrA.getPublicStatus().initialized, true, 'Refused import must not wipe the vault');
+
+  // 7D. Export from device A -> import on a clean device B; the counter travels with the file
+  const exported = mgrA.exportVaultFile();
+  const importedStatus = mgrB.importVaultFile(exported);
+  assert.strictEqual(importedStatus.initialized, true);
+  assert.strictEqual(importedStatus.securityCounter.failedAttempts, 1, 'Failed-attempt count must travel with the file');
+  const okB = mgrB.unlockVault({ questionAnswers: { 1: 'a1', 2: 'a2' }, phoneLast4: '4321' });
+  assert.strictEqual(okB.success, true, 'Imported vault must unlock on the new device');
+  assert.strictEqual(okB.payload.words.join(' '), words24.join(' '));
+
+  // 7E. Importing over a DIFFERENT existing vault needs explicit confirmation
+  mgrC.initializeNewVault({
+    words: words24,
+    questions: [{ question: 'Q1', answer: 'z1' }],
+    phoneLast4: '1234',
+    policyMode: 'QUESTIONS_AND_PIN_OR_CODE',
+  });
+  assert.throws(() => mgrC.importVaultFile(exported), /Vault อื่น/);
+  assert.strictEqual(mgrC.getPublicStatus().initialized, true, 'Unconfirmed import must keep the existing vault');
+  assert.strictEqual(mgrC.importVaultFile(exported, { replaceExisting: true }).initialized, true);
+
+  // 7F. Garbage files are refused
+  assert.throws(() => mgrC.importVaultFile(Buffer.from('not a vault')), /ไม่ใช่ seedvault.dat/);
+
+  for (const d of [devA, devB, devC]) fs.rmSync(d, { recursive: true, force: true });
+  console.log('  ✅ ผ่าน: นำเข้า/ส่งออกข้ามเครื่องได้ (จำนวนครั้งติดไปกับไฟล์), ปฏิเสธไฟล์เก่า/ไฟล์ขยะโดยไม่ทำลายของเดิม, ห้าม PIN อย่างเดียว และนับครั้งก่อนคำนวณรหัส\n');
 
   fs.rmSync(flashDriveDir, { recursive: true, force: true });
   fs.rmSync(cleanComputerAnchorDir, { recursive: true, force: true });

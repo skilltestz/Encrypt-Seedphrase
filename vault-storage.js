@@ -28,12 +28,49 @@ const {
 } = require('./crypto-engine');
 
 const DEFAULT_VAULT_FILENAME = 'seedvault.dat';
+
+/**
+ * Per-device data directory. The vault the app actually runs on lives HERE (on the internal
+ * disk of the Mac / PC / Tails), never on the Flash Drive: the Flash Drive only carries a master
+ * copy that is imported into this directory before use. Override with `SEEDVAULT_DATA_DIR`.
+ */
+function resolveDefaultDataDir() {
+  if (process.env.SEEDVAULT_DATA_DIR) {
+    return path.resolve(process.env.SEEDVAULT_DATA_DIR);
+  }
+  const home = os.homedir();
+  if (process.platform === 'darwin') {
+    return path.join(home, 'Library', 'Application Support', 'SeedVault');
+  }
+  if (process.platform === 'win32') {
+    return path.join(process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'SeedVault');
+  }
+  return path.join(process.env.XDG_DATA_HOME || path.join(home, '.local', 'share'), 'seedvault');
+}
+
+/**
+ * Best-effort heuristic: is this path on removable media (Flash Drive)?
+ */
+function isLikelyRemovablePath(p) {
+  const abs = path.resolve(p);
+  if (process.platform === 'darwin') return abs.startsWith('/Volumes/');
+  if (process.platform === 'win32') {
+    const sysDrive = (process.env.SystemDrive || 'C:').toUpperCase();
+    return path.parse(abs).root.toUpperCase().slice(0, 2) !== sysDrive;
+  }
+  return abs.startsWith('/media/') || abs.startsWith('/run/media/') || abs.startsWith('/mnt/');
+}
 const MAGIC_HEADER = 'SVLT1';
 const ANCHOR_DOMAIN_SECRET = 'SeedVault-MonotonicAnchor-Integrity-Key-v2';
 
 class VaultStorageManager {
   constructor(storageDir = __dirname, vaultFilename = DEFAULT_VAULT_FILENAME) {
     this.storageDir = storageDir;
+    try {
+      fs.mkdirSync(storageDir, { recursive: true, mode: 0o700 });
+    } catch (_e) {
+      // surfaced later on first write
+    }
     this.vaultPath = path.join(storageDir, vaultFilename);
     this.portableAnchorPath = path.join(storageDir, '.svlt_state.anchor');
     this.osAnchorPaths = this._resolveOsAnchorPaths();
@@ -541,16 +578,101 @@ class VaultStorageManager {
    * Initializes a new encrypted Seedphrase Vault (First-Time Setup)
    */
   initializeNewVault(setupConfig) {
+    // Build + validate FIRST so a rejected configuration can never destroy an existing vault.
+    const innerVault = createEncryptedVault(setupConfig);
+
+    // A 4-digit PIN alone is only 10^4 guesses (~1-2 hours of offline brute force if the file
+    // ever leaks). Refuse any configuration that creates a slot unlockable by the PIN by itself.
+    if (innerVault.keySlots.some((s) => s.slotType === 'PHONE_ONLY')) {
+      throw new Error(
+        'ไม่อนุญาตให้ใช้เบอร์โทร 4 หลักเพียงอย่างเดียวในการปลดล็อก (เดาได้ครบใน 1–2 ชั่วโมงหากไฟล์หลุด) ' +
+          'กรุณาใช้โหมด "ต้องตอบคำถาม และ กรอกเบอร์/รหัสพิเศษ" หรือโหมดเข้มงวดสูงสุด และปิดตัวเลือกทางด่วนเบอร์โทร'
+      );
+    }
+
     if (fs.existsSync(this.vaultPath)) {
       this.secureWipeAndReset('Re-initializing new vault');
     }
 
-    const innerVault = createEncryptedVault(setupConfig);
     innerVault.vaultId = crypto.randomUUID();
     innerVault.monotonicSeq = 0;
 
     this._saveVaultDiskState(innerVault);
     return this.getPublicStatus();
+  }
+
+  /**
+   * Imports a `seedvault.dat` carried on a Flash Drive into THIS device's local data directory.
+   * Run the app offline from the local copy; the Flash Drive file stays untouched as a master.
+   *
+   * Never destroys anything on a rejected import: a stale/rolled-back file is simply refused.
+   */
+  importVaultFile(fileBuffer, { replaceExisting = false } = {}) {
+    let env;
+    try {
+      env = JSON.parse(Buffer.from(fileBuffer).toString('utf8'));
+    } catch (_e) {
+      throw new Error('ไฟล์ที่เลือกไม่ใช่ seedvault.dat ที่ถูกต้อง');
+    }
+    if (
+      !env ||
+      env.magic !== MAGIC_HEADER ||
+      typeof env.vaultId !== 'string' ||
+      !Number.isInteger(env.seq) ||
+      !Number.isInteger(env.failedAttempts) ||
+      !env.outerEncrypted
+    ) {
+      throw new Error('ไฟล์ที่เลือกไม่ใช่ seedvault.dat ที่ถูกต้อง');
+    }
+
+    const observed = this._readMaxObservedState(env.vaultId);
+    if (observed.wiped) {
+      throw new Error('Vault นี้ถูกทำลายบนเครื่องนี้ไปแล้ว ไม่สามารถนำเข้าซ้ำได้ (ใช้ไฟล์ล่าสุดจากเครื่องที่ใช้งานล่าสุด)');
+    }
+    if (observed.anyAnchorFound && (env.seq < observed.maxSeq || env.failedAttempts < observed.maxFailed)) {
+      throw new Error(
+        'ไฟล์นี้เก่ากว่าสถานะที่เครื่องนี้เคยบันทึกไว้ จึงไม่ถูกนำเข้า (ป้องกันการย้อนจำนวนครั้ง) — ' +
+          'ให้ส่งออกไฟล์ล่าสุดจากเครื่องนี้แทน หรือใช้ไฟล์ที่ใหม่กว่า'
+      );
+    }
+
+    if (fs.existsSync(this.vaultPath)) {
+      let existing = null;
+      try {
+        existing = JSON.parse(fs.readFileSync(this.vaultPath, 'utf8'));
+      } catch (_e) {
+        existing = null;
+      }
+      const sameVault = existing && existing.vaultId === env.vaultId;
+      if (sameVault && Number.isInteger(existing.seq) && existing.seq > env.seq) {
+        throw new Error('เครื่องนี้มีไฟล์ Vault เดียวกันที่ใหม่กว่าอยู่แล้ว จึงไม่ถูกนำเข้า');
+      }
+      if (!sameVault && !replaceExisting) {
+        throw new Error('เครื่องนี้มี Vault อื่นอยู่แล้ว การนำเข้าจะลบทำลายของเดิม — ยืนยันการแทนที่ก่อนนำเข้า');
+      }
+      if (!sameVault) {
+        this.secureWipeAndReset('Replaced by imported vault');
+      }
+    }
+
+    this._writeBufferInPlace(this.vaultPath, Buffer.from(fileBuffer));
+    const inner = this._loadVaultDiskState(); // verifies integrity + syncs this device's anchors
+    if (!inner) {
+      throw new Error('นำเข้าไม่สำเร็จ: ไฟล์ไม่ผ่านการตรวจสอบความสมบูรณ์');
+    }
+    return this.getPublicStatus();
+  }
+
+  /**
+   * Returns the current `seedvault.dat` bytes (with up-to-date counters) so the user can copy
+   * the latest state back to the Flash Drive after using this device.
+   */
+  exportVaultFile() {
+    const inner = this._loadVaultDiskState();
+    if (!inner) {
+      throw new Error('ไม่พบ Vault บนเครื่องนี้ให้ส่งออก');
+    }
+    return fs.readFileSync(this.vaultPath);
   }
 
   /**
@@ -578,17 +700,26 @@ class VaultStorageManager {
       };
     }
 
+    // Commit the attempt BEFORE the slow key derivation runs: killing the process (or pulling the
+    // power) mid-derivation can no longer give a free, uncounted guess.
+    const maxAttempts = innerVault.securityCounter.maxAttempts;
+    innerVault.securityCounter.failedAttempts += 1;
+    innerVault.securityCounter.remainingAttempts = Math.max(
+      0,
+      maxAttempts - innerVault.securityCounter.failedAttempts
+    );
+    this._saveVaultDiskState(innerVault);
+
     const result = attemptUnlockVault(innerVault, credentials);
 
     if (result.success) {
-      if (innerVault.securityCounter.failedAttempts > 0) {
-        innerVault.securityCounter.failedAttempts = 0;
-        innerVault.securityCounter.remainingAttempts = innerVault.securityCounter.maxAttempts;
-        const newVaultId = crypto.randomUUID();
-        innerVault.vaultId = newVaultId;
-        innerVault.monotonicSeq = 0;
-        this._saveVaultDiskState(innerVault);
-      }
+      // Correct: restore a full allowance. A fresh vaultId is required because the anchors keep a
+      // monotonic maximum of failures per vaultId and would otherwise flag the reset as rollback.
+      innerVault.securityCounter.failedAttempts = 0;
+      innerVault.securityCounter.remainingAttempts = maxAttempts;
+      innerVault.vaultId = crypto.randomUUID();
+      innerVault.monotonicSeq = 0;
+      this._saveVaultDiskState(innerVault);
 
       return {
         success: true,
@@ -599,12 +730,6 @@ class VaultStorageManager {
         payload: result.payload,
       };
     }
-
-    innerVault.securityCounter.failedAttempts += 1;
-    innerVault.securityCounter.remainingAttempts = Math.max(
-      0,
-      innerVault.securityCounter.maxAttempts - innerVault.securityCounter.failedAttempts
-    );
 
     const remaining = innerVault.securityCounter.remainingAttempts;
 
@@ -617,11 +742,9 @@ class VaultStorageManager {
         remainingAttempts: 0,
         maxAttempts: innerVault.securityCounter.maxAttempts,
         error:
-          'คุณกรอกรหัสผิดเกินจำนวนที่กำหนด! ข้อมูล Seedphrase ที่เข้ารหัสไว้ถูกลบทำลายอย่างถาวร (Zero-Wipe) และรีเซ็ตโปรแกรมกลับสู่โหมดเริ่มต้นใหม่แล้ว',
+          'คุณกรอกรหัสผิดเกินจำนวนที่กำหนด! ข้อมูล Seedphrase ที่เข้ารหัสไว้ถูกลบทำลายและรีเซ็ตโปรแกรมกลับสู่โหมดเริ่มต้นใหม่แล้ว',
       };
     }
-
-    this._saveVaultDiskState(innerVault);
 
     return {
       success: false,
@@ -638,4 +761,6 @@ class VaultStorageManager {
 module.exports = Object.freeze({
   VaultStorageManager,
   DEFAULT_VAULT_FILENAME,
+  resolveDefaultDataDir,
+  isLikelyRemovablePath,
 });

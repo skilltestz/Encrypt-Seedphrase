@@ -16,7 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
-const { VaultStorageManager } = require('./vault-storage');
+const { VaultStorageManager, resolveDefaultDataDir, isLikelyRemovablePath } = require('./vault-storage');
 const { GameGuardModuleRegistry } = require('./game-module');
 const {
   mnemonicToSeed,
@@ -80,6 +80,18 @@ function createSeedVaultServer(storageDir = __dirname) {
     const remote = req.socket && req.socket.remoteAddress;
     if (remote && remote !== '127.0.0.1' && remote !== '::1' && remote !== '::ffff:127.0.0.1') {
       throw new Error('Forbidden: Non-loopback connection rejected');
+    }
+
+    // DNS-rebinding defence: a malicious website can be made to resolve to 127.0.0.1, in which case
+    // the browser sends the attacker's hostname in `Host`. Only our own loopback origin is accepted.
+    const port = server.address() && server.address().port;
+    const allowedHosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`]);
+    if (!allowedHosts.has(String(req.headers.host || '').toLowerCase())) {
+      throw new Error('Forbidden: Invalid Host header');
+    }
+    const origin = req.headers.origin;
+    if (origin && !Array.from(allowedHosts).some((h) => origin === `http://${h}`)) {
+      throw new Error('Forbidden: Cross-origin request rejected');
     }
 
     if (requireCsrf) {
@@ -149,13 +161,16 @@ function createSeedVaultServer(storageDir = __dirname) {
         const body = await readJsonBody(req);
 
         // Hard Server-Side Anti-Bot Game Gatekeeper Check:
-        // If the vault has gameModule.enabled === true, require a valid gamePassToken
+        // If the vault has gameModule.enabled === true, require a valid gamePassToken.
+        // The token is SINGLE-USE and burned on every attempt (right or wrong), so each password
+        // guess costs one full game round.
         const pubStatus = storage.getPublicStatus();
         if (pubStatus.initialized && pubStatus.gameModule && pubStatus.gameModule.enabled) {
-          if (!gameRegistry.validateGamePassToken(body.gamePassToken)) {
+          if (!gameRegistry.consumeGamePassToken(body.gamePassToken)) {
             return sendJson(res, 403, {
               success: false,
-              error: 'กรุณาเล่นด่านเกมส์ป้องกันบอทให้ผ่านครบทุกด่านก่อนกรอกรหัสผ่าน',
+              needGame: true,
+              error: 'กรุณาเล่นด่านเกมส์ป้องกันบอทให้ผ่านครบทุกด่านก่อนกรอกรหัสผ่าน (ผ่านเกมได้ 1 ครั้งต่อการกรอกรหัส 1 ครั้ง)',
             });
           }
         }
@@ -186,6 +201,9 @@ function createSeedVaultServer(storageDir = __dirname) {
         verifyLoopbackAndCsrf(req, true);
         const body = await readJsonBody(req);
         const session = gameRegistry.createChallengeSession(body);
+        if (session.throttled) {
+          return sendJson(res, 429, { ok: false, error: session.error });
+        }
         return sendJson(res, 200, { ok: true, session });
       }
 
@@ -193,7 +211,30 @@ function createSeedVaultServer(storageDir = __dirname) {
         verifyLoopbackAndCsrf(req, true);
         const body = await readJsonBody(req);
         const verification = gameRegistry.verifyChallengeSession(body.sessionId, body.submission);
-        return sendJson(res, 200, { ok: true, ...verification });
+        return sendJson(res, verification.throttled ? 429 : 200, { ok: true, ...verification });
+      }
+
+      // Device migration: Flash Drive -> this device (import) and this device -> Flash Drive (export)
+      if (req.method === 'POST' && pathname === '/api/vault/import') {
+        verifyLoopbackAndCsrf(req, true);
+        const body = await readJsonBody(req);
+        if (typeof body.fileBase64 !== 'string' || body.fileBase64.length === 0) {
+          return sendJson(res, 400, { ok: false, error: 'ไม่พบไฟล์ seedvault.dat ที่จะนำเข้า' });
+        }
+        const status = storage.importVaultFile(Buffer.from(body.fileBase64, 'base64'), {
+          replaceExisting: body.replaceExisting === true,
+        });
+        return sendJson(res, 200, { ok: true, status });
+      }
+
+      if (req.method === 'POST' && pathname === '/api/vault/export') {
+        verifyLoopbackAndCsrf(req, true);
+        const bytes = storage.exportVaultFile();
+        return sendJson(res, 200, {
+          ok: true,
+          filename: 'seedvault.dat',
+          fileBase64: bytes.toString('base64'),
+        });
       }
 
       // Bitcoin HD Wallet & Transaction Signing APIs (24-Word Seed / Manual Seed / Direct Hardware USB)
@@ -305,13 +346,31 @@ function launchNativeWindow(url) {
 }
 
 if (require.main === module) {
-  const { server } = createSeedVaultServer(__dirname);
+  const dataDir = resolveDefaultDataDir();
+  const { server, storage } = createSeedVaultServer(dataDir);
+
+  // Convenience for existing users: if the device has no vault yet but a `seedvault.dat` sits next
+  // to the app (e.g. run straight from the Flash Drive), COPY it into the local data directory.
+  const legacyFile = path.join(__dirname, 'seedvault.dat');
+  if (!fs.existsSync(storage.vaultPath) && fs.existsSync(legacyFile) && path.resolve(__dirname) !== path.resolve(dataDir)) {
+    try {
+      storage.importVaultFile(fs.readFileSync(legacyFile));
+      console.log(` 📥 นำเข้า seedvault.dat จาก ${legacyFile} ลงเครื่องนี้แล้ว (ไฟล์ต้นฉบับไม่ถูกแก้ไข)`);
+    } catch (err) {
+      console.log(` ⚠️ ไม่ได้นำเข้า seedvault.dat เดิม: ${err.message}`);
+    }
+  }
+
   server.listen(DEFAULT_PORT, HOST, () => {
     const addr = server.address();
     const url = `http://${HOST}:${addr.port}`;
     console.log('==============================================================');
     console.log(' 🔐 SeedVault Zero-Knowledge Vault & Bitcoin Signer (v3.0)');
     console.log(` 🌐 เปิดใช้งานที่: ${url}`);
+    console.log(` 💾 ข้อมูล Vault เก็บบนเครื่องนี้ที่: ${dataDir}`);
+    if (isLikelyRemovablePath(__dirname)) {
+      console.log(' 💡 โปรแกรมรันจาก Flash Drive แต่ข้อมูลจะถูกเก็บบนเครื่องนี้ ใช้ปุ่ม "ส่งออก" เพื่อนำไฟล์ล่าสุดกลับไปเก็บบน Flash Drive');
+    }
     console.log(' 🖥️ รองรับ: Windows OS | macOS | Tails OS');
     console.log(' 🛑 กด Ctrl+C เพื่อปิดโปรแกรมเมื่อใช้งานเสร็จ');
     console.log('==============================================================');
